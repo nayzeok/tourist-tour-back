@@ -1,0 +1,50 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+  binaryTargets   = ["native", "debian-openssl-3.0.x", "darwin-arm64"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [pgcrypto, uuid_ossp(map: "uuid-ossp")]
+}
+
+enum UserRole {
+  USER
+  ADMIN
+  SUPERADMIN
+}
+
+model User {
+  id           String    @id @default(dbgenerated("uuid_generate_v4()"))
+  email        String    @unique
+  passwordHash String
+  role         UserRole  @default(USER)
+  firstName    String?
+  lastName     String?
+  phone        String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  bookings     Booking[]
+}
+
+model Booking {
+  id            String   @id @default(dbgenerated("uuid_generate_v4()"))
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId        String
+  number        String   @unique
+  status        String
+  propertyId    String?
+  arrivalDate   DateTime?
+  departureDate DateTime?
+  guestsCount   Int?
+  totalAmount   Float?
+  currency      String?
+  payload       Json?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([userId, createdAt])
+}
