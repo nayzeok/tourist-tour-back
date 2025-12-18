@@ -7,6 +7,7 @@ import {
   Query,
   Req,
   UseGuards,
+  ForbiddenException,
   forwardRef,
 } from '@nestjs/common'
 import { FastifyRequest } from 'fastify'
@@ -23,9 +24,9 @@ interface AuthenticatedRequest extends FastifyRequest {
 @Controller('users')
 export class UserController {
   constructor(
-    private readonly users: UserService,
-    @Inject(forwardRef(() => AuthService))
-    private readonly auth: AuthService,
+      private readonly users: UserService,
+      @Inject(forwardRef(() => AuthService))
+      private readonly auth: AuthService,
   ) {}
 
   @Get('me')
@@ -44,8 +45,8 @@ export class UserController {
   @Get('bookings')
   @UseGuards(JwtAuthGuard)
   async bookings(
-    @Req() req: AuthenticatedRequest,
-    @Query() query: GetBookingsQueryDto,
+      @Req() req: AuthenticatedRequest,
+      @Query() query: GetBookingsQueryDto,
   ) {
     if (!req.user) {
       return { total: 0, page: 1, pageSize: 0, items: [] }
@@ -54,19 +55,42 @@ export class UserController {
     return this.users.getBookings(req.user.id, page, pageSize)
   }
 
+  /**
+   * Получить все бронирования (только для SUPERADMIN)
+   */
+  @Get('admin/bookings')
+  @UseGuards(JwtAuthGuard)
+  async allBookings(
+      @Req() req: AuthenticatedRequest,
+      @Query() query: GetBookingsQueryDto,
+  ) {
+    if (!req.user) {
+      throw new ForbiddenException('Не авторизован')
+    }
+
+    // Проверяем роль пользователя
+    const user = await this.users.findById(req.user.id)
+    if (!user || user.role !== 'SUPERADMIN') {
+      throw new ForbiddenException('Доступ запрещён. Требуется роль SUPERADMIN.')
+    }
+
+    const { page, pageSize } = query
+    return this.users.getAllBookings(page, pageSize)
+  }
+
   @Patch('password')
   @UseGuards(JwtAuthGuard)
   async changePassword(
-    @Req() req: AuthenticatedRequest,
-    @Body() body: ChangePasswordDto,
+      @Req() req: AuthenticatedRequest,
+      @Body() body: ChangePasswordDto,
   ) {
     if (!req.user) {
       return { success: false }
     }
     await this.auth.changePassword(
-      req.user.id,
-      body.currentPassword,
-      body.newPassword,
+        req.user.id,
+        body.currentPassword,
+        body.newPassword,
     )
     return { success: true }
   }
