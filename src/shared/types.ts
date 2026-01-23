@@ -76,6 +76,9 @@ export type RoomOffer = {
   ratePlanId?: string
   amenities?: string[] // коды удобств именно roomType
   availability?: number // остаток по офферу
+  cancellationPenaltyAmount?: number | null // размер штрафа
+  cancellationPenaltyDeadline?: string | null // после какого времени начисляется штраф
+  cancellationPenaltyCurrency?: string // валюта штрафа
 }
 
 // ----- Полный ответ для страницы отеля -----
@@ -123,4 +126,7 @@ export type HotelCard = {
   checkInTime?: string // "14:00"
   checkOutTime?: string // "12:00"
   timeZone?: string // "Europe/London"
+  cancellationPenaltyAmount?: number | null // размер штрафа
+  cancellationPenaltyDeadline?: string | null // после какого времени начисляется штраф (ISO datetime)
+  cancellationPenaltyCurrency?: string // валюта штрафа
 }

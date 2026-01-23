@@ -328,6 +328,9 @@ export class SearchService {
       checkInTime: content.policy?.checkInTime,
       checkOutTime: content.policy?.checkOutTime,
       timeZone: content.timeZone?.id,
+      cancellationPenaltyAmount: rs.cancellationPolicy?.penaltyAmount ?? null,
+      cancellationPenaltyDeadline: rs.cancellationPolicy?.freeCancellationDeadlineLocal ?? null,
+      cancellationPenaltyCurrency: currency,
     }
   }
 

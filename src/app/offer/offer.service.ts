@@ -176,6 +176,9 @@ export class OfferService {
       ratePlanId: (rs as any)?.ratePlan?.id,
       amenities: roomAmenities as unknown as any, // <— коды удобств именно этого типа номера
       availability: rs.availability, // <— остаток по офферу (удобно для бейджей «остался 1 номер»)
+      cancellationPenaltyAmount: rs.cancellationPolicy?.penaltyAmount ?? null,
+      cancellationPenaltyDeadline: rs.cancellationPolicy?.freeCancellationDeadlineLocal ?? null,
+      cancellationPenaltyCurrency: currency,
     }
   }
 
