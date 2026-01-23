@@ -325,6 +325,9 @@ export class SearchService {
       payOnSite,
       price: { value: perNight, currency, per: 'night' },
       guestsNote: `за ночь для ${guestsTotal} гост${this.ruPlural(guestsTotal, 'я', 'ей')}`,
+      checkInTime: content.policy?.checkInTime,
+      checkOutTime: content.policy?.checkOutTime,
+      timeZone: content.timeZone?.id,
     }
   }
 

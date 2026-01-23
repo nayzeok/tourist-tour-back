@@ -17,6 +17,13 @@ export type TLPropertyContent = {
       longitude?: number
     }
   }
+  policy?: {
+    checkInTime?: string // "14:00"
+    checkOutTime?: string // "12:00"
+  }
+  timeZone?: {
+    id?: string // "Europe/London"
+  }
   amenities?: { code: string; displayName?: string }[]
   roomTypes?: Array<{
     id: string
@@ -113,4 +120,7 @@ export type HotelCard = {
   payOnSite: boolean
   price: { value: number; currency: string; per: 'night' | 'stay' }
   guestsNote: string // "за ночь для 3 гостей"
+  checkInTime?: string // "14:00"
+  checkOutTime?: string // "12:00"
+  timeZone?: string // "Europe/London"
 }
