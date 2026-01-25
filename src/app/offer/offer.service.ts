@@ -146,19 +146,21 @@ export class OfferService {
       undefined
     const mealLabel = mealCode ? this.search.mealLabel(mealCode) : null
 
-    // отмена
-    const freeCancel = rs.cancellationPolicy?.freeCancellationPossible
-      ? rs.cancellationPolicy.freeCancellationDeadlineLocal
-        ? `до ${formatRuDate(rs.cancellationPolicy.freeCancellationDeadlineLocal)}`
-        : true
-      : false
+    // Политика отмены - передаём полную информацию
+    const currency = rs.currencyCode || content.currency || 'RUB'
+    const cancellationPolicy = {
+      freeCancellationPossible: rs.cancellationPolicy?.freeCancellationPossible ?? false,
+      freeCancellationDeadlineLocal: rs.cancellationPolicy?.freeCancellationDeadlineLocal ?? null,
+      freeCancellationDeadlineUtc: rs.cancellationPolicy?.freeCancellationDeadlineUtc ?? null,
+      penaltyAmount: rs.cancellationPolicy?.penaltyAmount ?? null,
+      penaltyCurrency: currency,
+    }
 
     // оплата
     const paymentType = rs.paymentPolicy?.type ?? rs.paymentType
 
     // цены
     const total = this.search.rsTotal(rs)
-    const currency = rs.currencyCode || content.currency || 'RUB'
     const perNight = Math.max(1, Math.round(total / Math.max(1, nights)))
 
     // картинки приоритезируем из контента (они обычно лучше и стабильнее)
@@ -176,7 +178,6 @@ export class OfferService {
       roomTypeId: rs.roomType?.id ?? rt?.id ?? '',
       roomTypeName: rs.roomType?.name ?? rt?.name ?? 'Номер',
       mealLabel,
-      freeCancel,
       paymentType,
       price: { total, perNight, currency },
       images,
@@ -185,9 +186,7 @@ export class OfferService {
       ratePlanId: (rs as any)?.ratePlan?.id,
       amenities: roomAmenities as unknown as any, // <— коды удобств именно этого типа номера
       availability: rs.availability, // <— остаток по офферу (удобно для бейджей «остался 1 номер»)
-      cancellationPenaltyAmount: rs.cancellationPolicy?.penaltyAmount ?? null,
-      cancellationPenaltyDeadline: rs.cancellationPolicy?.freeCancellationDeadlineLocal ?? null,
-      cancellationPenaltyCurrency: currency,
+      cancellationPolicy,
     }
   }
 

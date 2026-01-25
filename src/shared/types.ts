@@ -68,7 +68,6 @@ export type RoomOffer = {
   roomTypeId: string
   roomTypeName: string
   mealLabel: string | null
-  freeCancel: boolean | string
   paymentType?: 'OnSite' | 'Prepay' | 'Guarantee'
   price: { total: number; perNight: number; currency: string }
   images: string[]
@@ -76,9 +75,14 @@ export type RoomOffer = {
   ratePlanId?: string
   amenities?: string[] // коды удобств именно roomType
   availability?: number // остаток по офферу
-  cancellationPenaltyAmount?: number | null // размер штрафа
-  cancellationPenaltyDeadline?: string | null // после какого времени начисляется штраф
-  cancellationPenaltyCurrency?: string // валюта штрафа
+  // Политика отмены (полная информация)
+  cancellationPolicy: {
+    freeCancellationPossible: boolean
+    freeCancellationDeadlineLocal?: string | null
+    freeCancellationDeadlineUtc?: string | null
+    penaltyAmount?: number | null
+    penaltyCurrency?: string
+  }
 }
 
 // ----- Полный ответ для страницы отеля -----
@@ -119,14 +123,18 @@ export type HotelCard = {
   // из Search (минимальный вариант)
   roomName: string
   mealLabel?: string | null
-  freeCancel: boolean | string // true | "до 12.10.2025" | false
   payOnSite: boolean
   price: { value: number; currency: string; per: 'night' | 'stay' }
   guestsNote: string // "за ночь для 3 гостей"
   checkInTime?: string // "14:00"
   checkOutTime?: string // "12:00"
   timeZone?: string // "Europe/London"
-  cancellationPenaltyAmount?: number | null // размер штрафа
-  cancellationPenaltyDeadline?: string | null // после какого времени начисляется штраф (ISO datetime)
-  cancellationPenaltyCurrency?: string // валюта штрафа
+  // Политика отмены (полная информация)
+  cancellationPolicy: {
+    freeCancellationPossible: boolean // возможна ли бесплатная отмена
+    freeCancellationDeadlineLocal?: string | null // дедлайн в локальном времени отеля "2025-08-19T17:41"
+    freeCancellationDeadlineUtc?: string | null // дедлайн в UTC "2025-08-19T14:41Z"
+    penaltyAmount?: number | null // размер штрафа
+    penaltyCurrency?: string // валюта штрафа (RUB, USD, etc.)
+  }
 }

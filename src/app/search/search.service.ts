@@ -305,20 +305,21 @@ export class SearchService {
       thumbImages.map((i) => i.url),
     )
 
-    // 4) питание/отмена/оплата — как было
+    // 4) питание/отмена/оплата
     const mealCode =
       rs.mealPlanCode ||
       rs.includedServices?.find((s) => s.mealPlanCode)?.mealPlanCode ||
       undefined
     const mealLabel = mealCode ? this.mealLabel(mealCode) : null
 
-    const freeCancel = rs.cancellationPolicy?.freeCancellationPossible
-      ? rs.cancellationPolicy.freeCancellationDeadlineLocal
-        ? `до ${formatRuDate(rs.cancellationPolicy.freeCancellationDeadlineLocal)}`
-        : true
-      : false
-
-    // console.log(JSON.stringify(rs, null, 2))
+    // Политика отмены - передаём полную информацию
+    const cancellationPolicy = {
+      freeCancellationPossible: rs.cancellationPolicy?.freeCancellationPossible ?? false,
+      freeCancellationDeadlineLocal: rs.cancellationPolicy?.freeCancellationDeadlineLocal ?? null,
+      freeCancellationDeadlineUtc: rs.cancellationPolicy?.freeCancellationDeadlineUtc ?? null,
+      penaltyAmount: rs.cancellationPolicy?.penaltyAmount ?? null,
+      penaltyCurrency: currency,
+    }
 
     const payOnSite =
       rs.paymentPolicy?.type === 'OnSite' || rs.paymentType === 'OnSite'
@@ -344,16 +345,13 @@ export class SearchService {
       // КЛЮЧЕВОЕ: берём имя комнаты из Search, иначе из Content
       roomName: rs.roomType?.name ?? rtFromContent?.name ?? 'Номер',
       mealLabel,
-      freeCancel,
       payOnSite,
       price: { value: perNight, currency, per: 'night' },
       guestsNote: `за ночь для ${guestsTotal} гост${this.ruPlural(guestsTotal, 'я', 'ей')}`,
       checkInTime: content.policy?.checkInTime,
       checkOutTime: content.policy?.checkOutTime,
       timeZone: content.timeZone?.id,
-      cancellationPenaltyAmount: rs.cancellationPolicy?.penaltyAmount ?? null,
-      cancellationPenaltyDeadline: rs.cancellationPolicy?.freeCancellationDeadlineLocal ?? null,
-      cancellationPenaltyCurrency: currency,
+      cancellationPolicy,
     }
   }
 
