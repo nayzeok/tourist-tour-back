@@ -8,6 +8,7 @@ import {
 } from '~/shared'
 import { SearchService } from '~/app/search/search.service'
 import { OAuthService } from '~/services'
+import { ImageProxyService } from '~/app/image-proxy/image-proxy.service'
 import { formatRuDate } from '~/utils/date'
 
 @Injectable()
@@ -15,6 +16,7 @@ export class OfferService {
   constructor(
     private readonly search: SearchService,
     private readonly oauth: OAuthService,
+    private readonly imageProxy: ImageProxyService,
   ) {}
 
   /**
@@ -90,10 +92,14 @@ export class OfferService {
       .filter(Boolean)
       .join(', ')
 
-    const thumbnail =
+    const rawThumbnail =
       content.images?.[0]?.url ??
       roomStays[0]?.roomType?.images?.[0]?.url ??
       null
+    // Трансформируем URL через наш прокси
+    const thumbnail = rawThumbnail
+      ? this.imageProxy.transformUrl(rawThumbnail)
+      : null
 
     // «Популярные» удобства объекта (короткий набор для иконок)
     const popularAmenityCodes = content.amenities
@@ -156,9 +162,12 @@ export class OfferService {
     const perNight = Math.max(1, Math.round(total / Math.max(1, nights)))
 
     // картинки приоритезируем из контента (они обычно лучше и стабильнее)
-    const images = (
-      rt?.images?.length ? rt.images : (rs.roomType?.images ?? [])
-    ).map((i) => i.url)
+    // Трансформируем URL через наш прокси
+    const images = this.imageProxy.transformUrls(
+      (rt?.images?.length ? rt.images : (rs.roomType?.images ?? [])).map(
+        (i) => i.url,
+      ),
+    )
 
     // удобства именно roomType (для блока «Услуги и удобства» у карточки номера)
     const roomAmenities = rt?.amenities ?? []

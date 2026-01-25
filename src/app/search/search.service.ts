@@ -3,6 +3,7 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common'
 import { AxiosError } from 'axios'
 import { OAuthService } from '~/services/oauth.service'
 import { RedisService } from '~/redis/redis.service'
+import { ImageProxyService } from '~/app/image-proxy/image-proxy.service'
 import {
   GuestCount,
   HotelCard,
@@ -20,6 +21,7 @@ export class SearchService {
   constructor(
     private readonly oauthService: OAuthService,
     private readonly redis: RedisService,
+    private readonly imageProxy: ImageProxyService,
   ) {}
 
   /**
@@ -280,7 +282,10 @@ export class SearchService {
         : rs.roomType?.images?.length
           ? rs.roomType.images
           : content.images) ?? []
-    const thumbnail = thumbImages.map((i) => i.url)
+    // Трансформируем URL через наш прокси
+    const thumbnail = this.imageProxy.transformUrls(
+      thumbImages.map((i) => i.url),
+    )
 
     // 4) питание/отмена/оплата — как было
     const mealCode =

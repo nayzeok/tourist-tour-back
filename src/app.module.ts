@@ -17,6 +17,7 @@ import { RedisModule } from '~/redis/redis.module'
 import { ReservationModule } from '~/app/reservation/reservation.module'
 import { AuthModule } from '~/app/auth/auth.module'
 import { UserModule } from '~/app/user/user.module'
+import { ImageProxyModule } from '~/app/image-proxy/image-proxy.module'
 
 @Module({
   imports: [
@@ -61,6 +62,7 @@ import { UserModule } from '~/app/user/user.module'
     ReservationModule,
     UserModule,
     AuthModule,
+    ImageProxyModule,
   ],
 
   controllers: [],

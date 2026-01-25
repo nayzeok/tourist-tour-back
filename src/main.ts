@@ -24,7 +24,10 @@ async function bootstrap() {
     },
   )
 
-  await app.register(fastifyHelmet)
+  await app.register(fastifyHelmet, {
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+    contentSecurityPolicy: false, // Отключаем CSP для dev, можно настроить для prod
+  })
 
   const configService = app.get(ConfigService)
 
