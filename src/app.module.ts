@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common'
 import { ConfigModule, ConfigService } from '@nestjs/config'
+import { ScheduleModule } from '@nestjs/schedule'
 
 import { LoggerModule } from 'nestjs-pino'
 import { randomUUID } from 'crypto'
@@ -18,6 +19,7 @@ import { ReservationModule } from '~/app/reservation/reservation.module'
 import { AuthModule } from '~/app/auth/auth.module'
 import { UserModule } from '~/app/user/user.module'
 import { ImageProxyModule } from '~/app/image-proxy/image-proxy.module'
+import { SyncModule } from '~/app/sync/sync.module'
 
 @Module({
   imports: [
@@ -63,6 +65,8 @@ import { ImageProxyModule } from '~/app/image-proxy/image-proxy.module'
     UserModule,
     AuthModule,
     ImageProxyModule,
+    ScheduleModule.forRoot(),
+    SyncModule,
   ],
 
   controllers: [],

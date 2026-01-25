@@ -43,8 +43,8 @@ export class CitiesService {
 
         const d = { cities: geoData }
 
-        // Кэшируем результат в Redis на 1 час
-        await this.redisService.setJson('geo:cities', d, 3600)
+        // Кэшируем результат в Redis на 24 часа (86400 секунд)
+        await this.redisService.setJson('geo:cities', d, 86400)
 
         return {
           success: true,

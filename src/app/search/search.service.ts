@@ -113,12 +113,30 @@ export class SearchService {
 
   // ---------- GEO ----------
 
+  private geoCacheKey(cityId: string): string {
+    return `geo:city:${cityId}:properties`
+  }
+
   private async getPropertyIdsByCity(cityId: string): Promise<string[]> {
-    // Берём всё за один вызов (tall иногда поддерживает пагинацию через next/offset)
+    // Проверяем кэш (TTL 24 часа)
+    const cacheKey = this.geoCacheKey(cityId)
+    const cached = await this.redis.getJson<string[]>(cacheKey)
+
+    if (cached) {
+      this.logger.debug(`Geo cache hit for city ${cityId}: ${cached.length} properties`)
+      return cached
+    }
+
+    // Берём из API
     const url = `https://partner.qatl.ru/api/geo/v1/cities/${cityId}/properties`
     const resp = await this.oauthService.get<TLGeoPropsResp>(url)
+    const ids = (resp?.properties ?? []).map((p) => p.id)
 
-    return (resp?.properties ?? []).map((p) => p.id)
+    // Кэшируем на 24 часа (86400 секунд)
+    await this.redis.setJson(cacheKey, ids, 86400)
+    this.logger.log(`Geo API called for city ${cityId}: ${ids.length} properties cached`)
+
+    return ids
   }
 
   // ---------- CONTENT + CACHE ----------
