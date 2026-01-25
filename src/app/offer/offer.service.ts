@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common'
+import { Injectable, Logger } from '@nestjs/common'
 import {
   GuestCount,
   PropertyOffersResponse,
@@ -9,14 +9,21 @@ import {
 import { SearchService } from '~/app/search/search.service'
 import { OAuthService } from '~/services'
 import { ImageProxyService } from '~/app/image-proxy/image-proxy.service'
+import { RedisService } from '~/redis/redis.service'
 import { formatRuDate } from '~/utils/date'
 
 @Injectable()
 export class OfferService {
+  private readonly logger = new Logger(OfferService.name)
+  
+  // In-flight запросы для дедупликации одновременных вызовов
+  private readonly inFlightRequests = new Map<string, Promise<{ roomStays: TLRoomStay[] }>>()
+
   constructor(
     private readonly search: SearchService,
     private readonly oauth: OAuthService,
     private readonly imageProxy: ImageProxyService,
+    private readonly redis: RedisService,
   ) {}
 
   /**
@@ -35,43 +42,15 @@ export class OfferService {
     // 1) Контент объекта: фото, звёзды, адрес, amenities по property и по roomType
     const { data: content } = await this.search.getPropertyContent(propertyId)
 
-    // 2) Поиск всех офферов по одному объекту (GET с QS; если окружение ожидает POST — фоллбек)
-    const params = new URLSearchParams({
-      adults: String(guests.adultCount),
-      arrivalDate: arrival,
-      departureDate: departure,
-      currencyCode: currency,
-    })
-    for (const age of guests.childAges ?? [])
-      params.append('childAges', String(age))
-
-    let rsResp: { roomStays: TLRoomStay[] } | undefined
-    try {
-      rsResp = await this.oauth.get<{ roomStays: TLRoomStay[] }>(
-        `https://partner.qatl.ru/api/search/v1/properties/${propertyId}/room-stays?${params.toString()}`,
-      )
-    } catch {
-      // Фоллбек на POST — на некоторых стендах метод может быть реализован так
-      const body = {
-        adults: guests.adultCount,
-        childAges: guests.childAges ?? [],
-        arrivalDate: arrival,
-        departureDate: departure,
-        pricePreference: {
-          currencyCode: currency,
-          minPrice: 0,
-          maxPrice: 100000,
-        },
-      }
-      rsResp = await this.oauth.post<{ roomStays: TLRoomStay[] }>(
-        `https://partner.qatl.ru/api/search/v1/properties/${propertyId}/room-stays`,
-        body,
-      )
-    }
-
-    const roomStays = (rsResp?.roomStays ?? []).filter(
-      (rs) => rs.propertyId === propertyId,
+    // 2) Поиск всех офферов по одному объекту с кэшированием и дедупликацией
+    const roomStays = await this.getRoomStaysWithDedup(
+      propertyId,
+      arrival,
+      departure,
+      guests,
+      currency,
     )
+
     const nights = this.search.diffNights(arrival, departure)
 
     // 3) Маппинг всех офферов
@@ -187,6 +166,99 @@ export class OfferService {
       amenities: roomAmenities as unknown as any, // <— коды удобств именно этого типа номера
       availability: rs.availability, // <— остаток по офферу (удобно для бейджей «остался 1 номер»)
       cancellationPolicy,
+    }
+  }
+
+  /**
+   * Получение room-stays с дедупликацией одновременных запросов и кратковременным кэшированием.
+   * Предотвращает дублирующие запросы к TravelLine API.
+   */
+  private async getRoomStaysWithDedup(
+    propertyId: string,
+    arrival: string,
+    departure: string,
+    guests: GuestCount,
+    currency: string,
+  ): Promise<TLRoomStay[]> {
+    // Формируем уникальный ключ для запроса
+    const childAgesStr = (guests.childAges ?? []).sort((a, b) => a - b).join(',')
+    const requestKey = `rs:${propertyId}:${arrival}:${departure}:${guests.adultCount}:${childAgesStr}:${currency}`
+    
+    // Проверяем кратковременный кэш (5 минут) для тех же параметров
+    const cacheKey = `search:room-stays:${requestKey}`
+    const cached = await this.redis.getJson<TLRoomStay[]>(cacheKey)
+    if (cached) {
+      this.logger.debug(`Room-stays cache hit: ${propertyId}`)
+      return cached
+    }
+
+    // Дедупликация: если уже есть запрос в полёте с теми же параметрами, ждём его
+    const inFlight = this.inFlightRequests.get(requestKey)
+    if (inFlight) {
+      this.logger.debug(`Room-stays request deduped: ${propertyId}`)
+      const result = await inFlight
+      return (result?.roomStays ?? []).filter((rs) => rs.propertyId === propertyId)
+    }
+
+    // Создаём новый запрос и регистрируем его как "в полёте"
+    const fetchPromise = this.fetchRoomStays(propertyId, arrival, departure, guests, currency)
+    this.inFlightRequests.set(requestKey, fetchPromise)
+
+    try {
+      const result = await fetchPromise
+      const roomStays = (result?.roomStays ?? []).filter((rs) => rs.propertyId === propertyId)
+      
+      // Кэшируем результат на 5 минут (цены могут меняться)
+      await this.redis.setJson(cacheKey, roomStays, 300)
+      
+      return roomStays
+    } finally {
+      // Удаляем из in-flight после завершения
+      this.inFlightRequests.delete(requestKey)
+    }
+  }
+
+  /**
+   * Непосредственный запрос к TravelLine Search API
+   */
+  private async fetchRoomStays(
+    propertyId: string,
+    arrival: string,
+    departure: string,
+    guests: GuestCount,
+    currency: string,
+  ): Promise<{ roomStays: TLRoomStay[] }> {
+    const params = new URLSearchParams({
+      adults: String(guests.adultCount),
+      arrivalDate: arrival,
+      departureDate: departure,
+      currencyCode: currency,
+    })
+    for (const age of guests.childAges ?? []) {
+      params.append('childAges', String(age))
+    }
+
+    try {
+      return await this.oauth.get<{ roomStays: TLRoomStay[] }>(
+        `https://partner.qatl.ru/api/search/v1/properties/${propertyId}/room-stays?${params.toString()}`,
+      )
+    } catch {
+      // Фоллбек на POST — на некоторых стендах метод может быть реализован так
+      const body = {
+        adults: guests.adultCount,
+        childAges: guests.childAges ?? [],
+        arrivalDate: arrival,
+        departureDate: departure,
+        pricePreference: {
+          currencyCode: currency,
+          minPrice: 0,
+          maxPrice: 100000,
+        },
+      }
+      return this.oauth.post<{ roomStays: TLRoomStay[] }>(
+        `https://partner.qatl.ru/api/search/v1/properties/${propertyId}/room-stays`,
+        body,
+      )
     }
   }
 
