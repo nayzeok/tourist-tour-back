@@ -127,7 +127,7 @@ export class ReservationController {
     summary:
       'Quick book (verify + create) from selected roomStay and guest form',
     description:
-      'В теле передай: propertyId, roomStay (из Search), arrival, departure, guestsCount, customer {firstName,lastName,phone,email,citizenship?}, guests?[...], paymentType?, prepayRemark?, prepaySum?',
+      'В теле передай: propertyId, roomStay (из Search), arrival, departure, guestsCount, customer {firstName,lastName,phone,email,citizenship?}, guests?[...], paymentType?, prepayRemark?, prepaySum?, acceptAlternative?, alternativeToken?',
   })
   @ApiResponse({ status: 200, description: 'Verify + Create result' })
   async quickBook(
@@ -158,6 +158,9 @@ export class ReservationController {
       prepayRemark?: string | null
       prepaySum?: number | null
       perBookingServices?: Array<{ id: string }>
+      // Параметры для подтверждения альтернативных условий (изменение цены)
+      acceptAlternative?: boolean
+      alternativeToken?: string
     },
   ) {
     const required = [
@@ -188,6 +191,8 @@ export class ReservationController {
       prepayRemark: body.prepayRemark ?? null,
       prepaySum: body.prepaySum ?? null,
       perBookingServices: body.perBookingServices,
+      acceptAlternative: body.acceptAlternative,
+      alternativeToken: body.alternativeToken,
     })
   }
 }
