@@ -9,11 +9,15 @@ import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger'
 import { FastifyReply } from 'fastify'
 import { PayKeeperService } from './paykeeper.service'
 import type { PayKeeperCartItem } from './paykeeper.service'
+import { ReservationService } from '~/app/reservation/reservation.service'
 
 @ApiTags('PayKeeper')
 @Controller('paykeeper')
 export class PayKeeperController {
-  constructor(private readonly paykeeper: PayKeeperService) {}
+  constructor(
+    private readonly paykeeper: PayKeeperService,
+    private readonly reservation: ReservationService,
+  ) {}
 
   /**
    * Webhook: POST-оповещение от PayKeeper об успешном платеже.
@@ -59,8 +63,13 @@ export class PayKeeperController {
     }
 
     res.status(200).type('text/plain').send(result.response)
-    if (orderid) {
-      this.paykeeper.onPaymentSuccess(orderid, id, sum).catch(() => {})
+    if (orderid && sum) {
+      this.reservation
+        .createBookingAfterPayment(orderid, sum)
+        .then(() => {
+          this.paykeeper.onPaymentSuccess(orderid, id, sum).catch(() => {})
+        })
+        .catch(() => {})
     }
   }
 

@@ -153,9 +153,15 @@ export class OfferService {
     // удобства именно roomType (для блока «Услуги и удобства» у карточки номера)
     const roomAmenities = rt?.amenities ?? []
 
+    const fullPlacementsName =
+      (rs as any).fullPlacementsName ??
+      rs.roomType?.fullPlacementsName ??
+      null
+
     return {
       roomTypeId: rs.roomType?.id ?? rt?.id ?? '',
       roomTypeName: rs.roomType?.name ?? rt?.name ?? 'Номер',
+      fullPlacementsName: fullPlacementsName || undefined,
       mealLabel,
       paymentType,
       price: { total, perNight, currency },

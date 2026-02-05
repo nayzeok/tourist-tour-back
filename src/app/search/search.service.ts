@@ -14,9 +14,16 @@ import {
 } from '~/shared'
 import { formatRuDate } from '~/utils/date'
 
+const AGGREGATION_CACHE_TTL_SEC = 120 // 2 мин — повторные запросы с теми же параметрами не дергают API
+
 @Injectable()
 export class SearchService {
   private readonly logger = new Logger(SearchService.name)
+  /** Дедупликация одновременных вызовов агрегационного поиска по ключу запроса */
+  private readonly inFlightAggregation = new Map<
+    string,
+    Promise<Map<string, TLRoomStay>>
+  >()
 
   constructor(
     private readonly oauthService: OAuthService,
@@ -55,13 +62,14 @@ export class SearchService {
     // 2) Контент: подтащим из кэша/догрузим что отсутствует
     const contentById = await this.getContentForIds(sliced)
 
-    // 3) Search (агрегатор): возьмём минимальные варианты по пачкам
-    const cheapestById = await this.getCheapestByPropertyIds(
-      sliced,
+    // 3) Search (агрегатор): результат кэшируется и дедуплицируется по (cityId, даты, гости, валюта)
+    const cheapestById = await this.getCheapestByPropertyIdsCached(
+      ids,
       arrival,
       departure,
       guests,
       currency,
+      cityId,
     )
 
     // console.log(JSON.stringify(Object.fromEntries(contentById), null, 2))
@@ -211,6 +219,74 @@ export class SearchService {
   }
 
   // ---------- SEARCH (AGGREGATOR) ----------
+
+  private aggregationCacheKey(
+    cityId: string,
+    arrival: string,
+    departure: string,
+    guests: GuestCount,
+    currency: string,
+  ): string {
+    const childAges = (guests.childAges ?? []).slice().sort((a, b) => a - b).join(',')
+    return `search:agg:${cityId}:${arrival}:${departure}:${guests.adultCount}:${childAges}:${currency}`
+  }
+
+  /**
+   * Агрегационный поиск с кэшем (Redis) и дедупликацией одновременных запросов.
+   * Исключает повторные POST /v1/properties/room-stays/search для одних и тех же параметров.
+   */
+  private async getCheapestByPropertyIdsCached(
+    ids: string[],
+    arrival: string,
+    departure: string,
+    guests: GuestCount,
+    currency: string,
+    cityId?: string,
+  ): Promise<Map<string, TLRoomStay>> {
+    const cacheKey = cityId
+      ? this.aggregationCacheKey(cityId, arrival, departure, guests, currency)
+      : null
+
+    if (cacheKey) {
+      const cached = await this.redis.getJson<Record<string, TLRoomStay>>(cacheKey)
+      if (cached && typeof cached === 'object') {
+        this.logger.debug(`Aggregation cache hit: ${cacheKey}`)
+        return new Map(Object.entries(cached))
+      }
+
+      const inFlight = this.inFlightAggregation.get(cacheKey)
+      if (inFlight) {
+        this.logger.debug(`Aggregation dedupe: awaiting in-flight for ${cacheKey}`)
+        return inFlight
+      }
+    }
+
+    const run = async (): Promise<Map<string, TLRoomStay>> => {
+      const result = await this.getCheapestByPropertyIds(
+        ids,
+        arrival,
+        departure,
+        guests,
+        currency,
+      )
+      if (cacheKey) {
+        await this.redis.setJson(
+          cacheKey,
+          Object.fromEntries(result),
+          AGGREGATION_CACHE_TTL_SEC,
+        )
+        this.inFlightAggregation.delete(cacheKey)
+      }
+      return result
+    }
+
+    if (cacheKey) {
+      const promise = run()
+      this.inFlightAggregation.set(cacheKey, promise)
+      return promise
+    }
+    return run()
+  }
 
   private async getCheapestByPropertyIds(
     ids: string[],

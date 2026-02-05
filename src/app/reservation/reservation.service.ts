@@ -4,13 +4,20 @@ import {
   Injectable,
   Logger,
 } from '@nestjs/common'
+import { randomUUID } from 'crypto'
 import { OAuthService } from '~/services'
-import { TLRoomStay } from '~/shared' // твой тип из Search API (roomStays)
+import { TLRoomStay } from '~/shared'
 import { format } from 'date-fns'
 import { AuthService } from '~/app/auth/auth.service'
 import { UserService } from '~/app/user/user.service'
 import { MailService } from '~/services/mail.service'
+import { RedisService } from '~/redis/redis.service'
 import axios, { AxiosError } from 'axios'
+
+const PENDING_BOOKING_PREFIX = 'pending-booking:'
+const PENDING_BOOKING_TTL_SEC = 30 * 60 // 30 минут
+const PAYMENT_SUCCESS_PREFIX = 'payment-success:'
+const PAYMENT_SUCCESS_TTL_SEC = 60 * 60 // 1 час
 
 /**
  * --- Минимальные типы под Reservation API (по твоему OpenAPI) ---
@@ -126,8 +133,10 @@ export type VerifyBookingRs = {
   // + в ответе ещё вернут актуальные цены/политики и т.д. — если нужно, расширишь
 }
 export type VerifyBookingResult = {
-  booking: VerifyBookingRs | null
-  alternativeBooking?: VerifyBookingRs | null
+  /** API может вернуть объект или массив (пустой = нет варианта по старым условиям) */
+  booking?: VerifyBookingRs | VerifyBookingRs[] | null
+  /** API может вернуть объект или массив (актуальный вариант при изменении цены/доступности) */
+  alternativeBooking?: VerifyBookingRs | VerifyBookingRs[] | null
   warnings?: Array<{ code?: string | null; message?: string | null }> | null
 }
 
@@ -204,6 +213,7 @@ export class ReservationService {
     private readonly authService: AuthService,
     private readonly users: UserService,
     private readonly mail: MailService,
+    private readonly redis: RedisService,
   ) {}
 
   /**
@@ -453,13 +463,12 @@ export class ReservationService {
     return total > 0 ? total : null
   }
 
+  /** Стоимость проживания (subtotal) без налогов и сборов */
   private getTotalAmount(result?: CreateBookingResult) {
     const total = result?.booking?.total
     if (!total) return null
-    const price = total.priceBeforeTax ?? 0
-    const tax = total.taxAmount ?? 0
-    const sum = price + tax
-    return Number.isFinite(sum) ? sum : null
+    const subtotal = total.priceBeforeTax ?? 0
+    return Number.isFinite(subtotal) ? subtotal : null
   }
 
   private async processBookingSideEffects(
@@ -720,28 +729,25 @@ export class ReservationService {
 
     const verifyRes = await this.verifyBooking(verifyPayload)
 
-    // Проверяем, есть ли токен вообще
-    if (
-      !verifyRes?.booking?.createBookingToken &&
-      !verifyRes?.alternativeBooking?.createBookingToken
-    ) {
-      // нет токена для создания — вероятно предупреждение/невозможность
-      return { 
-        verify: verifyRes, 
+    const bookingToken = this.getVerifyBookingToken(verifyRes)
+    const alternativeTokenObj = this.getVerifyAlternativeBooking(verifyRes)
+
+    if (!bookingToken?.createBookingToken && !alternativeTokenObj?.createBookingToken) {
+      return {
+        verify: verifyRes,
         created: null,
         priceChanged: false,
       }
     }
 
-    // КЛЮЧЕВОЙ СЦЕНАРИЙ: цена/доступность изменились
-    // booking пустой, но есть alternativeBooking
-    if (!verifyRes?.booking?.createBookingToken && verifyRes?.alternativeBooking?.createBookingToken) {
-      const originalPrice = roomStay?.total?.priceAfterTax ?? roomStay?.total?.priceBeforeTax ?? null
-      const alternativePrice = this.extractPriceFromVerifyResult(verifyRes.alternativeBooking)
+    if (!bookingToken?.createBookingToken && alternativeTokenObj?.createBookingToken) {
+      const originalPrice =
+        roomStay?.total?.priceBeforeTax ?? roomStay?.total?.priceAfterTax ?? null
+      const alternativePrice = this.extractPriceFromVerifyResult(alternativeTokenObj)
       const currencyCode = roomStay?.currencyCode ?? 'RUB'
-      
+
       this.logger.log(
-        `Price changed for property ${propertyId}: ${originalPrice} -> ${alternativePrice} ${currencyCode}`,
+        `Price/availability changed for property ${propertyId}: ${originalPrice} -> ${alternativePrice} ${currencyCode}`,
       )
 
       return {
@@ -750,17 +756,17 @@ export class ReservationService {
         priceChanged: true,
         originalPrice,
         alternativePrice,
-        priceDifference: alternativePrice && originalPrice 
-          ? alternativePrice - originalPrice 
-          : null,
+        priceDifference:
+          alternativePrice != null && originalPrice != null
+            ? alternativePrice - originalPrice
+            : null,
         currencyCode,
-        alternativeToken: verifyRes.alternativeBooking.createBookingToken,
+        alternativeToken: alternativeTokenObj.createBookingToken,
         warnings: verifyRes.warnings,
       }
     }
 
-    // Стандартный сценарий: цена не изменилась, сразу создаём бронь
-    const token = verifyRes.booking!.createBookingToken
+    const token = bookingToken!.createBookingToken
 
     // 6) CREATE
     const createPayload: CreateBookingRequest = {
@@ -872,17 +878,291 @@ export class ReservationService {
   }
 
   /**
-   * Извлечение цены из результата верификации
+   * Подготовка к оплате: только верификация, сохранение payload в Redis.
+   * Бронирование создаётся после подтверждения оплаты (webhook PayKeeper) с суммой в prepayment.prepaidSum.
    */
+  async preparePayment(params: {
+    propertyId: string
+    roomStay: TLRoomStay
+    arrival: string
+    departure: string
+    guestsCount: BookingGuestCount
+    customer: {
+      firstName: string
+      lastName: string
+      phone: string
+      email: string
+      citizenship?: string
+      comment?: string
+    }
+    guests?: BookingGuest[]
+    perBookingServices?: Array<{ id: string }> | null
+    acceptAlternative?: boolean
+    alternativeToken?: string
+    /** Сумма к оплате при подтверждении новых условий (alternativePrice) */
+    amountForAlternative?: number
+  }): Promise<
+    | { paymentId: string; amount: number; currencyCode: string }
+    | {
+        priceChanged: true
+        originalPrice: number | null
+        alternativePrice: number | null
+        priceDifference: number | null
+        currencyCode: string
+        alternativeToken: string
+        warnings?: Array<{ code?: string | null; message?: string | null }> | null
+      }
+    | { noAvailability: true; message: string; warnings?: Array<{ code?: string | null; message?: string | null }> | null }
+  > {
+    const {
+      propertyId,
+      roomStay,
+      arrival,
+      departure,
+      guestsCount,
+      customer,
+      guests = [],
+      perBookingServices = null,
+      acceptAlternative = false,
+      alternativeToken,
+      amountForAlternative,
+    } = params
+
+    const bookingCustomer: BookingCustomer = {
+      firstName: customer.firstName,
+      lastName: customer.lastName,
+      citizenship: customer.citizenship,
+      contacts: {
+        phones: [{ phoneNumber: customer.phone }],
+        emails: [{ emailAddress: customer.email }],
+      },
+      comment: customer.comment,
+    }
+
+    let createBookingToken: string
+    let amount: number
+    const currencyCode = roomStay?.currencyCode ?? 'RUB'
+
+    if (acceptAlternative && alternativeToken) {
+      createBookingToken = alternativeToken
+      amount =
+        amountForAlternative ??
+        (roomStay?.total?.priceBeforeTax ?? roomStay?.total?.priceAfterTax ?? 0)
+    } else {
+      const hydratedRoomStay = await this.hydrateRoomStay({
+        roomStay,
+        propertyId,
+        arrival,
+        departure,
+        guestsCount,
+      })
+      const stayDates = this.buildStayDatesFromRoomStay(
+        hydratedRoomStay,
+        arrival,
+        departure,
+      )
+      const roomStaysRq: BookingRoomStayRq[] = [
+        this.buildRoomStayRq(hydratedRoomStay, stayDates, guestsCount, guests),
+      ]
+
+      const verifyPayload: VerifyBookingRequest = {
+        booking: {
+          propertyId,
+          roomStays: roomStaysRq,
+          customer: bookingCustomer,
+          prepayment: undefined,
+          services: perBookingServices,
+        },
+      }
+
+      const verifyRes = await this.verifyBooking(verifyPayload)
+      const bookingToken = this.getVerifyBookingToken(verifyRes)
+      const alternativeTokenObj = this.getVerifyAlternativeBooking(verifyRes)
+
+      if (!bookingToken?.createBookingToken && !alternativeTokenObj?.createBookingToken) {
+        return {
+          noAvailability: true,
+          message:
+            'Номера по выбранным условиям закончились или условия изменились. Вернитесь к поиску и выберите другие даты или вариант.',
+          warnings: verifyRes?.warnings,
+        }
+      }
+
+      if (!bookingToken?.createBookingToken && alternativeTokenObj?.createBookingToken) {
+        const originalPrice =
+          roomStay?.total?.priceBeforeTax ?? roomStay?.total?.priceAfterTax ?? null
+        const alternativePrice = this.extractPriceFromVerifyResult(alternativeTokenObj)
+        return {
+          priceChanged: true,
+          originalPrice,
+          alternativePrice: alternativePrice ?? null,
+          priceDifference:
+            alternativePrice != null && originalPrice != null
+              ? alternativePrice - originalPrice
+              : null,
+          currencyCode,
+          alternativeToken: alternativeTokenObj.createBookingToken,
+          warnings: verifyRes?.warnings,
+        }
+      }
+
+      createBookingToken = bookingToken!.createBookingToken
+      amount =
+        this.extractPriceFromVerifyResult(bookingToken!) ??
+        (roomStay?.total?.priceBeforeTax ?? roomStay?.total?.priceAfterTax ?? 0)
+
+      const paymentId = randomUUID()
+      const stored = {
+        createBookingToken,
+        booking: {
+          propertyId,
+          roomStays: roomStaysRq,
+          customer: bookingCustomer,
+          services: perBookingServices,
+        },
+      }
+      await this.redis.setJson(
+        `${PENDING_BOOKING_PREFIX}${paymentId}`,
+        stored,
+        PENDING_BOOKING_TTL_SEC,
+      )
+      return { paymentId, amount, currencyCode }
+    }
+
+    const hydratedRoomStay = await this.hydrateRoomStay({
+      roomStay,
+      propertyId,
+      arrival,
+      departure,
+      guestsCount,
+    })
+    const stayDates = this.buildStayDatesFromRoomStay(
+      hydratedRoomStay,
+      arrival,
+      departure,
+    )
+    const roomStaysRq: BookingRoomStayRq[] = [
+      this.buildRoomStayRq(hydratedRoomStay, stayDates, guestsCount, guests),
+    ]
+
+    const paymentId = randomUUID()
+    const stored = {
+      createBookingToken,
+      booking: {
+        propertyId,
+        roomStays: roomStaysRq,
+        customer: bookingCustomer,
+        services: perBookingServices,
+      },
+    }
+    await this.redis.setJson(
+      `${PENDING_BOOKING_PREFIX}${paymentId}`,
+      stored,
+      PENDING_BOOKING_TTL_SEC,
+    )
+    return { paymentId, amount, currencyCode }
+  }
+
+  /**
+   * Создание брони после подтверждения оплаты. Вызывается из webhook PayKeeper.
+   * Сумма оплаты передаётся в prepayment.prepaidSum.
+   */
+  async createBookingAfterPayment(
+    paymentId: string,
+    paidSum: string,
+  ): Promise<CreateBookingResult | null> {
+    const key = `${PENDING_BOOKING_PREFIX}${paymentId}`
+    const stored = await this.redis.getJson<{
+      createBookingToken: string
+      booking: {
+        propertyId: string
+        roomStays: BookingRoomStayRq[]
+        customer: BookingCustomer
+        services: Array<{ id: string }> | null
+      }
+    }>(key)
+
+    if (!stored?.createBookingToken || !stored?.booking) {
+      this.logger.warn(`createBookingAfterPayment: no pending booking for ${paymentId}`)
+      return null
+    }
+
+    const paidAmount = Number(paidSum)
+    if (!Number.isFinite(paidAmount) || paidAmount < 0) {
+      this.logger.warn(`createBookingAfterPayment: invalid sum ${paidSum}`)
+      return null
+    }
+
+    const prepayment: BookingPrepayment = {
+      paymentType: 'PrePay',
+      prepaidSum: paidAmount,
+    }
+
+    const createPayload: CreateBookingRequest = {
+      booking: {
+        ...stored.booking,
+        createBookingToken: stored.createBookingToken,
+        prepayment,
+      },
+    }
+
+    try {
+      const result = await this.createBooking(createPayload)
+      await this.redis.del(key)
+      const bookingNumber = result?.booking?.number
+      if (bookingNumber) {
+        await this.redis.setJson(
+          `${PAYMENT_SUCCESS_PREFIX}${paymentId}`,
+          { bookingNumber },
+          PAYMENT_SUCCESS_TTL_SEC,
+        )
+      }
+      return result
+    } catch (err) {
+      this.logger.error(`createBookingAfterPayment failed: ${err}`)
+      throw err
+    }
+  }
+
+  /**
+   * Результат успешной оплаты по paymentId (для страницы success).
+   */
+  async getPaymentSuccessResult(
+    paymentId: string,
+  ): Promise<{ bookingNumber: string } | null> {
+    return this.redis.getJson(`${PAYMENT_SUCCESS_PREFIX}${paymentId}`)
+  }
+
+  /**
+   * Нормализация ответа verify: API может вернуть booking/alternativeBooking как массив.
+   * Возвращаем один объект или null.
+   */
+  private normalizeVerifyBooking(
+    raw: VerifyBookingRs | VerifyBookingRs[] | null | undefined,
+  ): VerifyBookingRs | null {
+    if (raw == null) return null
+    if (Array.isArray(raw)) return raw[0] ?? null
+    return raw
+  }
+
+  private getVerifyBookingToken(res: VerifyBookingResult | null | undefined): VerifyBookingRs | null {
+    return this.normalizeVerifyBooking(res?.booking as any)
+  }
+
+  private getVerifyAlternativeBooking(
+    res: VerifyBookingResult | null | undefined,
+  ): VerifyBookingRs | null {
+    return this.normalizeVerifyBooking(res?.alternativeBooking as any)
+  }
+
+  /** Извлечение стоимости проживания (subtotal) без налогов — для предоплаты и отображения */
   private extractPriceFromVerifyResult(verifyRs: VerifyBookingRs): number | null {
-    // Здесь нужно извлечь цену из ответа verify
-    // Структура зависит от API, примерно:
     const booking = verifyRs as any
     return (
-      booking?.total?.priceAfterTax ??
       booking?.total?.priceBeforeTax ??
-      booking?.roomStays?.[0]?.total?.priceAfterTax ??
+      booking?.total?.priceAfterTax ??
       booking?.roomStays?.[0]?.total?.priceBeforeTax ??
+      booking?.roomStays?.[0]?.total?.priceAfterTax ??
       null
     )
   }

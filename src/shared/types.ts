@@ -59,7 +59,11 @@ export type TLRoomStay = {
     images?: { url: string }[]
     address?: { addressLine?: string; cityName?: string }
     placements?: Array<{ kind?: string; code?: string; count: number }>
+    /** Описание основных и дополнительных мест (зависит от тарифа) */
+    fullPlacementsName?: string | null
   }
+  /** Описание основных и дополнительных мест (может приходить на уровне room-stay) */
+  fullPlacementsName?: string | null
 }
 
 // ----- DTO для карточек «офферов» -----
@@ -67,6 +71,8 @@ export type TLRoomStay = {
 export type RoomOffer = {
   roomTypeId: string
   roomTypeName: string
+  /** Количество основных и дополнительных мест (по fullPlacementsName, может отличаться по тарифу) */
+  fullPlacementsName?: string | null
   mealLabel: string | null
   paymentType?: 'OnSite' | 'Prepay' | 'Guarantee'
   price: { total: number; perNight: number; currency: string }

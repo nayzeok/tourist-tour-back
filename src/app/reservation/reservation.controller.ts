@@ -8,6 +8,7 @@ import {
   Post,
   Query,
 } from '@nestjs/common'
+import { ApiQuery } from '@nestjs/swagger'
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger'
 import { ReservationService } from './reservation.service'
 
@@ -118,6 +119,65 @@ export class ReservationController {
       )
     }
     return this.reservation.modifyBooking(number, body)
+  }
+
+  // ---------- Подготовка к оплате (verify, без create). Бронь создаётся после оплаты в webhook. ----------
+  @Post('prepare-payment')
+  @ApiOperation({
+    summary: 'Prepare payment (verify only). Booking is created after PayKeeper confirms payment.',
+    description:
+      'Returns paymentId and amount. Frontend creates invoice with orderId=paymentId, then on payment success webhook creates booking with prepayment.prepaidSum = paid amount.',
+  })
+  @ApiResponse({ status: 200, description: 'paymentId, amount, currencyCode OR priceChanged with alternativeToken' })
+  async preparePayment(
+    @Body()
+    body: {
+      propertyId: string
+      roomStay: any
+      arrival: string
+      departure: string
+      guestsCount: { adultCount: number; childAges?: number[] }
+      customer: {
+        firstName: string
+        lastName: string
+        phone: string
+        email: string
+        citizenship?: string
+        comment?: string
+      }
+      guests?: Array<{ firstName: string; lastName: string; middleName?: string; citizenship?: string }>
+      perBookingServices?: Array<{ id: string }>
+      acceptAlternative?: boolean
+      alternativeToken?: string
+      amountForAlternative?: number
+    },
+  ) {
+    const required = ['propertyId', 'roomStay', 'arrival', 'departure', 'guestsCount', 'customer'] as const
+    for (const k of required) {
+      if (!(body as any)[k]) throw new BadRequestException(`${k} is required`)
+    }
+    return this.reservation.preparePayment({
+      propertyId: body.propertyId,
+      roomStay: body.roomStay,
+      arrival: body.arrival,
+      departure: body.departure,
+      guestsCount: body.guestsCount,
+      customer: body.customer,
+      guests: body.guests,
+      perBookingServices: body.perBookingServices ?? null,
+      acceptAlternative: body.acceptAlternative,
+      alternativeToken: body.alternativeToken,
+      amountForAlternative: body.amountForAlternative,
+    })
+  }
+
+  @Get('payment-success')
+  @ApiOperation({ summary: 'Get booking number by paymentId after successful payment' })
+  @ApiQuery({ name: 'paymentId', required: true })
+  @ApiResponse({ status: 200, description: 'bookingNumber' })
+  async paymentSuccess(@Query('paymentId') paymentId: string) {
+    if (!paymentId) throw new BadRequestException('paymentId is required')
+    return this.reservation.getPaymentSuccessResult(paymentId) ?? { bookingNumber: null }
   }
 
   // ---------- Упрощённый сценарий: QUICK BOOK ----------
