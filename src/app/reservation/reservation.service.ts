@@ -1007,9 +1007,31 @@ export class ReservationService {
       }
 
       createBookingToken = bookingToken!.createBookingToken
-      amount =
+      const verifiedPrice =
         this.extractPriceFromVerifyResult(bookingToken!) ??
         (roomStay?.total?.priceBeforeTax ?? roomStay?.total?.priceAfterTax ?? 0)
+      amount = verifiedPrice
+
+      const originalPrice =
+        roomStay?.total?.priceBeforeTax ?? roomStay?.total?.priceAfterTax ?? null
+      const priceDiff =
+        originalPrice != null && verifiedPrice != null
+          ? Math.abs(verifiedPrice - originalPrice)
+          : 0
+      const priceActuallyChanged = priceDiff > 0.01
+
+      if (priceActuallyChanged) {
+        return {
+          priceChanged: true,
+          originalPrice,
+          alternativePrice: verifiedPrice,
+          priceDifference:
+            originalPrice != null ? verifiedPrice - originalPrice : null,
+          currencyCode,
+          alternativeToken: bookingToken!.createBookingToken,
+          warnings: verifyRes?.warnings,
+        }
+      }
 
       const paymentId = randomUUID()
       const stored = {
