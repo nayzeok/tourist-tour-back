@@ -15,7 +15,7 @@ import { RedisService } from '~/redis/redis.service'
 import axios, { AxiosError } from 'axios'
 
 const PENDING_BOOKING_PREFIX = 'pending-booking:'
-const PENDING_BOOKING_TTL_SEC = 30 * 60 // 30 минут
+const PENDING_BOOKING_TTL_SEC = 60 * 60 // 60 минут (запас на долгую оплату)
 const PAYMENT_SUCCESS_PREFIX = 'payment-success:'
 const PAYMENT_SUCCESS_TTL_SEC = 60 * 60 // 1 час
 
@@ -225,10 +225,18 @@ export class ReservationService {
     arrival: string,
     departure: string,
   ): BookingStayDates {
-    const arrivalDateTime =
+    let arrivalDateTime =
       (roomStay as any)?.stayDates?.arrivalDateTime ?? arrival
-    const departureDateTime =
+    let departureDateTime =
       (roomStay as any)?.stayDates?.departureDateTime ?? departure
+
+    // TravelLine требует формат "YYYY-MM-DDThh:mm" — добавляем дефолтное время если его нет
+    if (arrivalDateTime && !arrivalDateTime.includes('T')) {
+      arrivalDateTime = `${arrivalDateTime}T14:00`
+    }
+    if (departureDateTime && !departureDateTime.includes('T')) {
+      departureDateTime = `${departureDateTime}T12:00`
+    }
 
     return {
       arrivalDateTime,
@@ -279,10 +287,13 @@ export class ReservationService {
     }
   }
 
-  private isCompleteRoomStay(rs: any): rs is TLRoomStay {
-    return Boolean(
-      rs?.roomType?.id && (rs?.ratePlan?.id || rs?.ratePlanId) && rs?.checksum,
-    )
+  private isCompleteRoomStay(rs: any): boolean {
+    // TLRoomStay формат: roomType.id, ratePlan.id, checksum
+    // RoomOffer формат: roomTypeId, ratePlanId, checksum
+    const hasRoomType = rs?.roomType?.id || rs?.roomTypeId
+    const hasRatePlan = rs?.ratePlan?.id || rs?.ratePlanId
+    const hasChecksum = !!rs?.checksum
+    return Boolean(hasRoomType && hasRatePlan && hasChecksum)
   }
 
   private async hydrateRoomStay(params: {
@@ -294,8 +305,31 @@ export class ReservationService {
   }): Promise<TLRoomStay> {
     const { roomStay, propertyId, arrival, departure, guestsCount } = params
     if (this.isCompleteRoomStay(roomStay)) {
+      this.logger.debug(`hydrateRoomStay: roomStay is complete, skipping fetch`)
+      // Если пришёл RoomOffer (roomTypeId вместо roomType.id), нормализуем в TLRoomStay-like
+      if (roomStay.roomTypeId && !roomStay.roomType?.id) {
+        return {
+          ...roomStay,
+          roomType: {
+            id: roomStay.roomTypeId,
+            name: roomStay.roomTypeName,
+            placements: roomStay.placements ?? [],
+          },
+          ratePlan: { id: roomStay.ratePlanId },
+          currencyCode: roomStay.price?.currency ?? 'RUB',
+          total: {
+            priceBeforeTax: roomStay.price?.total ?? 0,
+            priceAfterTax: roomStay.price?.total ?? 0,
+          },
+        } as any
+      }
       return roomStay
     }
+
+    this.logger.warn(
+      `hydrateRoomStay: roomStay INCOMPLETE, fetching fresh data. ` +
+      `roomType.id=${roomStay?.roomType?.id}, ratePlan.id=${roomStay?.ratePlan?.id}, checksum=${!!roomStay?.checksum}`,
+    )
 
     const desiredRatePlanId = roomStay?.ratePlan?.id ?? roomStay?.ratePlanId
     const desiredRoomTypeId = roomStay?.roomType?.id ?? roomStay?.roomTypeId
@@ -401,8 +435,14 @@ export class ReservationService {
    */
   async createBooking(payload: CreateBookingRequest) {
     const url = `${this.base}/v1/bookings`
+    this.logger.log(
+      `createBooking: calling TravelLine API for propertyId=${payload.booking?.propertyId}, token=${payload.booking?.createBookingToken?.slice(0, 12)}...`,
+    )
     try {
       const res = await this.oauth.post<CreateBookingResult>(url, payload)
+      this.logger.log(
+        `createBooking: TravelLine responded, bookingNumber=${res?.booking?.number ?? 'NONE'}, status=${res?.booking?.status ?? 'NONE'}`,
+      )
 
       try {
         await this.processBookingSideEffects(payload, res)
@@ -562,7 +602,18 @@ export class ReservationService {
   async cancelBooking(number: string, body: BookingCancellationRq) {
     const url = `${this.base}/v1/bookings/${encodeURIComponent(number)}/cancel`
     try {
-      return await this.oauth.post<GetBookingRs>(url, body)
+      const result = await this.oauth.post<GetBookingRs>(url, body)
+
+      // Обновляем статус в локальной БД
+      try {
+        const newStatus = result?.booking?.status ?? 'Cancelled'
+        await this.users.updateBookingStatus(number, newStatus)
+        this.logger.log(`Booking ${number} cancelled, DB status updated to ${newStatus}`)
+      } catch (dbErr) {
+        this.logger.error(`Failed to update DB status for cancelled booking ${number}: ${dbErr}`)
+      }
+
+      return result
     } catch (error) {
       this.handleAxiosError(error, 'cancelBooking')
     }
@@ -707,14 +758,18 @@ export class ReservationService {
       comment: customer.comment,
     }
 
-    // 4) prepayment (если тебе надо указать тип, согласно твоей логике)
-    const prepayment: BookingPrepayment | undefined = paymentType
-      ? {
-          paymentType,
-          remark: prepayRemark ?? undefined,
-          prepaidSum: prepaySum ?? undefined,
-        }
-      : undefined
+    // 4) prepayment — всегда передаём сумму предоплаты, чтобы TravelLine видел её в отчётах
+    const resolvedPrepaySum =
+      prepaySum ??
+      hydratedRoomStay?.total?.priceBeforeTax ??
+      hydratedRoomStay?.total?.priceAfterTax ??
+      (roomStay as any)?.price?.total ??
+      undefined
+    const prepayment: BookingPrepayment = {
+      paymentType: paymentType ?? 'PrePay',
+      remark: prepayRemark ?? undefined,
+      prepaidSum: resolvedPrepaySum,
+    }
 
     // 5) VERIFY (получить createBookingToken)
     const verifyPayload: VerifyBookingRequest = {
@@ -853,13 +908,18 @@ export class ReservationService {
       comment: customer.comment,
     }
 
-    const prepayment: BookingPrepayment | undefined = paymentType
-      ? {
-          paymentType,
-          remark: prepayRemark ?? undefined,
-          prepaidSum: prepaySum ?? undefined,
-        }
-      : undefined
+    // prepayment — всегда передаём сумму предоплаты для отчётов TravelLine
+    const resolvedPrepaySum =
+      prepaySum ??
+      hydratedRoomStay?.total?.priceBeforeTax ??
+      hydratedRoomStay?.total?.priceAfterTax ??
+      (roomStay as any)?.price?.total ??
+      undefined
+    const prepayment: BookingPrepayment = {
+      paymentType: paymentType ?? 'PrePay',
+      remark: prepayRemark ?? undefined,
+      prepaidSum: resolvedPrepaySum,
+    }
 
     const createPayload: CreateBookingRequest = {
       booking: {
@@ -1036,6 +1096,7 @@ export class ReservationService {
       const paymentId = randomUUID()
       const stored = {
         createBookingToken,
+        prepaidSum: amount,
         booking: {
           propertyId,
           roomStays: roomStaysRq,
@@ -1070,6 +1131,7 @@ export class ReservationService {
     const paymentId = randomUUID()
     const stored = {
       createBookingToken,
+      prepaidSum: amount,
       booking: {
         propertyId,
         roomStays: roomStaysRq,
@@ -1088,6 +1150,9 @@ export class ReservationService {
   /**
    * Создание брони после подтверждения оплаты. Вызывается из webhook PayKeeper.
    * Сумма оплаты передаётся в prepayment.prepaidSum.
+   *
+   * Если createBookingToken протух (TravelLine вернул ошибку), делаем
+   * повторный verify → create с новым токеном (до MAX_RETRIES попыток).
    */
   async createBookingAfterPayment(
     paymentId: string,
@@ -1096,6 +1161,7 @@ export class ReservationService {
     const key = `${PENDING_BOOKING_PREFIX}${paymentId}`
     const stored = await this.redis.getJson<{
       createBookingToken: string
+      prepaidSum?: number
       booking: {
         propertyId: string
         roomStays: BookingRoomStayRq[]
@@ -1109,17 +1175,22 @@ export class ReservationService {
       return null
     }
 
-    const paidAmount = Number(paidSum)
-    if (!Number.isFinite(paidAmount) || paidAmount < 0) {
-      this.logger.warn(`createBookingAfterPayment: invalid sum ${paidSum}`)
+    // Используем сохранённую сумму (priceBeforeTax) из Redis, а не paidSum от PayKeeper,
+    // т.к. PayKeeper может прислать сумму с налогами (priceAfterTax),
+    // а TravelLine требует prepaidSum <= priceBeforeTax.
+    const prepaidSum = stored.prepaidSum ?? Number(paidSum)
+    if (!Number.isFinite(prepaidSum) || prepaidSum < 0) {
+      this.logger.warn(`createBookingAfterPayment: invalid prepaidSum ${prepaidSum} (paidSum=${paidSum})`)
       return null
     }
+    this.logger.log(`createBookingAfterPayment: using prepaidSum=${prepaidSum} (PayKeeper sum=${paidSum})`)
 
     const prepayment: BookingPrepayment = {
       paymentType: 'PrePay',
-      prepaidSum: paidAmount,
+      prepaidSum,
     }
 
+    // --- Попытка 1: используем сохранённый токен ---
     const createPayload: CreateBookingRequest = {
       booking: {
         ...stored.booking,
@@ -1130,19 +1201,73 @@ export class ReservationService {
 
     try {
       const result = await this.createBooking(createPayload)
-      await this.redis.del(key)
-      const bookingNumber = result?.booking?.number
-      if (bookingNumber) {
-        await this.redis.setJson(
-          `${PAYMENT_SUCCESS_PREFIX}${paymentId}`,
-          { bookingNumber },
-          PAYMENT_SUCCESS_TTL_SEC,
-        )
-      }
+      await this.onBookingCreatedAfterPayment(key, paymentId, result)
       return result
-    } catch (err) {
-      this.logger.error(`createBookingAfterPayment failed: ${err}`)
-      throw err
+    } catch (firstErr) {
+      this.logger.warn(
+        `createBookingAfterPayment: first attempt failed for ${paymentId}, will retry with fresh token: ${firstErr}`,
+      )
+    }
+
+    // --- Попытка 2: re-verify для получения нового токена ---
+    try {
+      this.logger.log(`createBookingAfterPayment: re-verifying booking for ${paymentId}`)
+      const verifyPayload: VerifyBookingRequest = {
+        booking: {
+          propertyId: stored.booking.propertyId,
+          roomStays: stored.booking.roomStays,
+          customer: stored.booking.customer,
+          prepayment: undefined,
+          services: stored.booking.services,
+        },
+      }
+
+      const verifyRes = await this.verifyBooking(verifyPayload)
+      const bookingToken = this.getVerifyBookingToken(verifyRes)
+      const altToken = this.getVerifyAlternativeBooking(verifyRes)
+      const newToken = bookingToken?.createBookingToken ?? altToken?.createBookingToken
+
+      if (!newToken) {
+        this.logger.error(
+          `createBookingAfterPayment: re-verify returned no token for ${paymentId}. Payment collected but booking NOT created!`,
+        )
+        return null
+      }
+
+      const retryPayload: CreateBookingRequest = {
+        booking: {
+          ...stored.booking,
+          createBookingToken: newToken,
+          prepayment,
+        },
+      }
+
+      const result = await this.createBooking(retryPayload)
+      this.logger.log(`createBookingAfterPayment: retry succeeded for ${paymentId}`)
+      await this.onBookingCreatedAfterPayment(key, paymentId, result)
+      return result
+    } catch (retryErr) {
+      this.logger.error(
+        `createBookingAfterPayment: retry also FAILED for ${paymentId}. Payment collected but booking NOT created! Error: ${retryErr}`,
+      )
+      throw retryErr
+    }
+  }
+
+  /** Общая логика после успешного создания брони из webhook */
+  private async onBookingCreatedAfterPayment(
+    redisKey: string,
+    paymentId: string,
+    result?: CreateBookingResult | null,
+  ) {
+    await this.redis.del(redisKey)
+    const bookingNumber = result?.booking?.number
+    if (bookingNumber) {
+      await this.redis.setJson(
+        `${PAYMENT_SUCCESS_PREFIX}${paymentId}`,
+        { bookingNumber },
+        PAYMENT_SUCCESS_TTL_SEC,
+      )
     }
   }
 

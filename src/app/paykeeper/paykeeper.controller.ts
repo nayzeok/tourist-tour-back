@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Logger,
   Post,
   Res,
 } from '@nestjs/common'
@@ -14,6 +15,8 @@ import { ReservationService } from '~/app/reservation/reservation.service'
 @ApiTags('PayKeeper')
 @Controller('paykeeper')
 export class PayKeeperController {
+  private readonly logger = new Logger(PayKeeperController.name)
+
   constructor(
     private readonly paykeeper: PayKeeperService,
     private readonly reservation: ReservationService,
@@ -64,12 +67,23 @@ export class PayKeeperController {
 
     res.status(200).type('text/plain').send(result.response)
     if (orderid && sum) {
+      this.logger.log(`Webhook received: starting booking creation for orderid=${orderid}, sum=${sum}`)
       this.reservation
         .createBookingAfterPayment(orderid, sum)
-        .then(() => {
-          this.paykeeper.onPaymentSuccess(orderid, id, sum).catch(() => {})
+        .then((bookingResult) => {
+          const bookingNumber = bookingResult?.booking?.number
+          this.logger.log(`Booking created successfully: orderid=${orderid}, bookingNumber=${bookingNumber}`)
+          if (bookingNumber) {
+            this.paykeeper.onPaymentSuccess(bookingNumber, id, sum).catch((err) => {
+              this.logger.error(`onPaymentSuccess failed for booking ${bookingNumber}: ${err}`)
+            })
+          }
         })
-        .catch(() => {})
+        .catch((err) => {
+          this.logger.error(`createBookingAfterPayment FAILED for orderid=${orderid}: ${err?.message ?? err}`, err?.stack)
+        })
+    } else {
+      this.logger.warn(`Webhook: missing orderid (${orderid}) or sum (${sum}), skipping booking creation`)
     }
   }
 

@@ -255,4 +255,16 @@ export class ReservationController {
       alternativeToken: body.alternativeToken,
     })
   }
+
+  // ---- Временный тестовый эндпоинт: эмуляция webhook (УДАЛИТЬ ПЕРЕД ДЕПЛОЕМ) ----
+  @Post('test-create-after-payment')
+  @ApiOperation({ summary: '[DEV ONLY] Simulate webhook — create booking after payment' })
+  async testCreateAfterPayment(
+    @Body() body: { paymentId: string; sum: string },
+  ) {
+    if (!body.paymentId || !body.sum) {
+      throw new BadRequestException('paymentId and sum are required')
+    }
+    return this.reservation.createBookingAfterPayment(body.paymentId, body.sum)
+  }
 }

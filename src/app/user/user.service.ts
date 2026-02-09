@@ -272,4 +272,11 @@ export class UserService {
       },
     })
   }
+
+  async updateBookingStatus(number: string, status: string): Promise<void> {
+    await this.db.booking.updateMany({
+      where: { number },
+      data: { status },
+    })
+  }
 }

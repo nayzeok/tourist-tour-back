@@ -171,6 +171,9 @@ export class OfferService {
       ratePlanId: (rs as any)?.ratePlan?.id,
       amenities: roomAmenities as unknown as any, // <— коды удобств именно этого типа номера
       availability: rs.availability, // <— остаток по офферу (удобно для бейджей «остался 1 номер»)
+      checksum: (rs as any)?.checksum ?? undefined,
+      placements: rs.roomType?.placements ?? [],
+      body: (rs as any)?.body ?? undefined,
       cancellationPolicy,
     }
   }
@@ -189,7 +192,7 @@ export class OfferService {
     // Формируем уникальный ключ для запроса
     const childAgesStr = (guests.childAges ?? []).sort((a, b) => a - b).join(',')
     const requestKey = `rs:${propertyId}:${arrival}:${departure}:${guests.adultCount}:${childAgesStr}:${currency}`
-    
+
     // Проверяем кратковременный кэш (5 минут) для тех же параметров
     const cacheKey = `search:room-stays:${requestKey}`
     const cached = await this.redis.getJson<TLRoomStay[]>(cacheKey)
@@ -207,13 +210,21 @@ export class OfferService {
     }
 
     // Создаём новый запрос и регистрируем его как "в полёте"
-    const fetchPromise = this.fetchRoomStays(propertyId, arrival, departure, guests, currency)
+    const fetchPromise = this.fetchRoomStays(
+      propertyId,
+      arrival,
+      departure,
+      guests,
+      currency,
+    )
     this.inFlightRequests.set(requestKey, fetchPromise)
 
     try {
       const result = await fetchPromise
-      const roomStays = (result?.roomStays ?? []).filter((rs) => rs.propertyId === propertyId)
-      
+      const roomStays = (result?.roomStays ?? []).filter(
+        (rs) => rs.propertyId === propertyId,
+      )
+
       // Кэшируем результат на 5 минут (цены могут меняться)
       await this.redis.setJson(cacheKey, roomStays, 300)
       

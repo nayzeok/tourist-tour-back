@@ -81,6 +81,12 @@ export type RoomOffer = {
   ratePlanId?: string
   amenities?: string[] // коды удобств именно roomType
   availability?: number // остаток по офферу
+  /** Checksum из Search API — нужен для verify/create бронирования */
+  checksum?: string
+  /** Placement-коды из Search API (AdultBed-1 и т.д.) */
+  placements?: Array<{ kind?: string; code?: string; count: number }>
+  /** Непрозрачное поле из Search API — требуется для verify/create */
+  body?: unknown
   // Политика отмены (полная информация)
   cancellationPolicy: {
     freeCancellationPossible: boolean
