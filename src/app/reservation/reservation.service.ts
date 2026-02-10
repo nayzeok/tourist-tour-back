@@ -224,19 +224,20 @@ export class ReservationService {
     roomStay: TLRoomStay,
     arrival: string,
     departure: string,
+    checkInTime?: string,
+    checkOutTime?: string,
   ): BookingStayDates {
     let arrivalDateTime =
       (roomStay as any)?.stayDates?.arrivalDateTime ?? arrival
     let departureDateTime =
       (roomStay as any)?.stayDates?.departureDateTime ?? departure
 
-    // TravelLine требует формат "YYYY-MM-DDThh:mm" — добавляем дефолтное время если его нет
-    if (arrivalDateTime && !arrivalDateTime.includes('T')) {
-      arrivalDateTime = `${arrivalDateTime}T14:00`
+    // Заезд: подставляем дефолтное время отеля (из Content API), если нет — оставляем дату, TravelLine подставит своё.
+    if (arrivalDateTime && !arrivalDateTime.includes('T') && checkInTime) {
+      arrivalDateTime = `${arrivalDateTime}T${checkInTime}`
     }
-    if (departureDateTime && !departureDateTime.includes('T')) {
-      departureDateTime = `${departureDateTime}T12:00`
-    }
+    // Выезд: время НЕ подставляем — API требует именно дефолтное время выезда и сам его подставит к дате.
+    // Явная передача checkOutTime приводит к ошибке "Check-out time should be the default time".
 
     return {
       arrivalDateTime,
@@ -283,17 +284,22 @@ export class ReservationService {
       checksum: (rs as any)?.checksum ?? '',
       services: null,
       extraStay: null,
-      body: (rs as any)?.body ?? undefined,
+      // API требует поле body в room stay; если Search не вернул — отправляем пустой объект
+      body: (rs as any)?.body ?? {},
     }
   }
 
   private isCompleteRoomStay(rs: any): boolean {
-    // TLRoomStay формат: roomType.id, ratePlan.id, checksum
-    // RoomOffer формат: roomTypeId, ratePlanId, checksum
+    // TLRoomStay формат: roomType.id, ratePlan.id, checksum, body (API verify требует непустой body)
+    // RoomOffer формат: roomTypeId, ratePlanId, checksum, body
     const hasRoomType = rs?.roomType?.id || rs?.roomTypeId
     const hasRatePlan = rs?.ratePlan?.id || rs?.ratePlanId
     const hasChecksum = !!rs?.checksum
-    return Boolean(hasRoomType && hasRatePlan && hasChecksum)
+    const hasBody =
+      rs?.body != null &&
+      (typeof rs.body !== 'object' ||
+        (Array.isArray(rs.body) ? rs.body.length > 0 : Object.keys(rs.body).length > 0))
+    return Boolean(hasRoomType && hasRatePlan && hasChecksum && hasBody)
   }
 
   private async hydrateRoomStay(params: {
@@ -620,10 +626,12 @@ export class ReservationService {
   }
 
   /**
-   * Посчитать штраф за отмену
+   * Посчитать штраф за отмену.
+   * API требует дату в формате yyyy-MM-ddTHH:mm:ssZ (без миллисекунд).
    */
   async calculatePenalty(number: string, cancellationDateTimeUtc: string) {
-    const qs = new URLSearchParams({ cancellationDateTimeUtc }).toString()
+    const normalized = cancellationDateTimeUtc.replace(/\.\d{3}Z$/i, 'Z')
+    const qs = new URLSearchParams({ cancellationDateTimeUtc: normalized }).toString()
     const url = `${this.base}/v1/bookings/${encodeURIComponent(number)}/calculate-cancellation-penalty?${qs}`
     try {
       return await this.oauth.get<ResultOfCalculatePenalty>(url)
@@ -697,6 +705,8 @@ export class ReservationService {
       guestsCount,
       customer,
       guests = [],
+      checkInTime,
+      checkOutTime,
       paymentType,
       prepayRemark,
       prepaySum,
@@ -715,6 +725,8 @@ export class ReservationService {
         guestsCount,
         customer,
         guests,
+        checkInTime,
+        checkOutTime,
         paymentType,
         prepayRemark,
         prepaySum,
@@ -736,6 +748,8 @@ export class ReservationService {
       hydratedRoomStay,
       arrival,
       departure,
+      checkInTime,
+      checkOutTime,
     )
 
     const roomStaysRq: BookingRoomStayRq[] = [
@@ -858,6 +872,8 @@ export class ReservationService {
       comment?: string
     }
     guests: BookingGuest[]
+    checkInTime?: string
+    checkOutTime?: string
     paymentType?: PaymentType
     prepayRemark?: string | null
     prepaySum?: number | null
@@ -872,6 +888,8 @@ export class ReservationService {
       guestsCount,
       customer,
       guests,
+      checkInTime,
+      checkOutTime,
       paymentType,
       prepayRemark,
       prepaySum,
@@ -891,6 +909,8 @@ export class ReservationService {
       hydratedRoomStay,
       arrival,
       departure,
+      checkInTime,
+      checkOutTime,
     )
 
     const roomStaysRq: BookingRoomStayRq[] = [

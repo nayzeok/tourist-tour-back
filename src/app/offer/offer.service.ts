@@ -103,6 +103,8 @@ export class OfferService {
       currency,
       minPrice: minPerNight,
       offers,
+      checkInTime: content.policy?.checkInTime,
+      checkOutTime: content.policy?.checkOutTime,
     }
   }
 

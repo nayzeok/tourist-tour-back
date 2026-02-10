@@ -114,6 +114,8 @@ export type PropertyOffersResponse = {
   currency: string
   minPrice?: number // минимальная цена / ночь среди offers
   offers: RoomOffer[] // все доступные варианты на даты
+  checkInTime?: string // "14:00" — дефолтное время заезда отеля
+  checkOutTime?: string // "12:00" — дефолтное время выезда отеля
 }
 
 export type TLPropertyBrief = { id: string }
