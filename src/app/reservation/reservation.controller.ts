@@ -267,4 +267,11 @@ export class ReservationController {
     }
     return this.reservation.createBookingAfterPayment(body.paymentId, body.sum)
   }
+
+  // ---- Тестовый эндпоинт: эмуляция изменения цены (УДАЛИТЬ ПЕРЕД ДЕПЛОЕМ) ----
+  @Post('test-price-change')
+  @ApiOperation({ summary: '[DEV ONLY] Test price change scenario - force alternativeBooking' })
+  async testPriceChange(@Body() body: any) {
+    return this.reservation.testPriceChangeScenario(body)
+  }
 }

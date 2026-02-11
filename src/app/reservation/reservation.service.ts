@@ -290,16 +290,22 @@ export class ReservationService {
   }
 
   private isCompleteRoomStay(rs: any): boolean {
-    // TLRoomStay формат: roomType.id, ratePlan.id, checksum, body (API verify требует непустой body)
+    // TLRoomStay формат: roomType.id, ratePlan.id, checksum, body
     // RoomOffer формат: roomTypeId, ratePlanId, checksum, body
+    // body должен быть реальным opaque полем от Search API (пустой {} часто отклоняется verify).
+    // Если body нет/пустой — нужно догидрировать roomStay через fetchRoomStays.
     const hasRoomType = rs?.roomType?.id || rs?.roomTypeId
     const hasRatePlan = rs?.ratePlan?.id || rs?.ratePlanId
     const hasChecksum = !!rs?.checksum
-    const hasBody =
-      rs?.body != null &&
-      (typeof rs.body !== 'object' ||
-        (Array.isArray(rs.body) ? rs.body.length > 0 : Object.keys(rs.body).length > 0))
+    const hasBody = this.hasNonEmptyBody(rs?.body)
     return Boolean(hasRoomType && hasRatePlan && hasChecksum && hasBody)
+  }
+
+  private hasNonEmptyBody(body: any): boolean {
+    if (body === undefined || body === null) return false
+    if (typeof body !== 'object') return true
+    if (Array.isArray(body)) return body.length > 0
+    return Object.keys(body).length > 0
   }
 
   private async hydrateRoomStay(params: {
@@ -334,7 +340,8 @@ export class ReservationService {
 
     this.logger.warn(
       `hydrateRoomStay: roomStay INCOMPLETE, fetching fresh data. ` +
-      `roomType.id=${roomStay?.roomType?.id}, ratePlan.id=${roomStay?.ratePlan?.id}, checksum=${!!roomStay?.checksum}`,
+      `roomType.id=${roomStay?.roomType?.id}, roomTypeId=${roomStay?.roomTypeId}, ` +
+      `ratePlan.id=${roomStay?.ratePlan?.id}, ratePlanId=${roomStay?.ratePlanId}, checksum=${!!roomStay?.checksum}`,
     )
 
     const desiredRatePlanId = roomStay?.ratePlan?.id ?? roomStay?.ratePlanId
@@ -354,8 +361,15 @@ export class ReservationService {
       currency,
     )
 
-    const match = roomStays.find((rs) => {
-      if (desiredChecksum && rs.checksum === desiredChecksum) return true
+    const byChecksum = desiredChecksum
+      ? roomStays.find((rs) => rs.checksum === desiredChecksum)
+      : null
+
+    if (byChecksum) {
+      return byChecksum
+    }
+
+    const byPlanOrRoom = roomStays.find((rs) => {
       if (
         desiredRatePlanId &&
         String((rs as any)?.ratePlan?.id) === String(desiredRatePlanId)
@@ -369,13 +383,33 @@ export class ReservationService {
       )
     })
 
-    if (!match) {
+    if (!byPlanOrRoom) {
       throw new BadRequestException(
         'Выбранный номер недоступен на указанные даты. Попробуйте обновить результаты поиска.',
       )
     }
 
-    return match
+    // ВАЖНО:
+    // Если клиент прислал checksum, но в свежем поиске exact-совпадения нет,
+    // это как раз кейс "условия изменились". Нельзя подменять checksum на актуальный,
+    // иначе verify пройдёт как "цена не изменилась" и бронь может создаться автоматически.
+    if (desiredChecksum) {
+      this.logger.warn(
+        `hydrateRoomStay: checksum mismatch, preserving client checksum for verify flow`,
+      )
+      return {
+        ...(byPlanOrRoom as any),
+        checksum: desiredChecksum,
+        // Если body в клиентском payload пустой/нет — используем найденный roomStay.
+        body: this.hasNonEmptyBody(roomStay?.body)
+          ? roomStay.body
+          : (byPlanOrRoom as any)?.body ?? {},
+        // внутренний флаг для quickBook: checksum из клиента не совпал с актуальным в поиске
+        __checksumMismatch: true,
+      } as TLRoomStay
+    }
+
+    return byPlanOrRoom
   }
 
   private async fetchRoomStays(
@@ -715,9 +749,16 @@ export class ReservationService {
       alternativeToken,
     } = params
 
-    // Если пользователь подтвердил новые условия и передал токен — сразу создаём бронь
+    this.logChecksumDebug('quickBook incoming roomStay', roomStay?.checksum)
+
+    // Если пользователь подтвердил новые условия и передал токен — создаём бронь
     if (acceptAlternative && alternativeToken) {
-      return this.createBookingWithToken({
+      this.logger.log(
+        `quickBook: acceptAlternative=true, using provided alternativeToken directly`
+      )
+
+      // Сразу создаём бронь с переданным токеном
+      const result = await this.createBookingWithToken({
         propertyId,
         roomStay,
         arrival,
@@ -733,6 +774,10 @@ export class ReservationService {
         perBookingServices,
         token: alternativeToken,
       })
+
+      // createBookingWithToken всегда возвращает корректный результат (успех или priceChanged/noAvailability)
+      // Просто возвращаем его, не продолжая выполнение
+      return result
     }
 
     // 2) один RoomStayRq из выбора
@@ -755,6 +800,7 @@ export class ReservationService {
     const roomStaysRq: BookingRoomStayRq[] = [
       this.buildRoomStayRq(hydratedRoomStay, stayDates, guestsCount, guests),
     ]
+    this.logChecksumDebug('quickBook outgoing verify roomStay', roomStaysRq[0]?.checksum)
 
     this.logger.debug(
       `roomStay request for verify: ${JSON.stringify(roomStaysRq[0], null, 2)}`,
@@ -801,22 +847,42 @@ export class ReservationService {
     const bookingToken = this.getVerifyBookingToken(verifyRes)
     const alternativeTokenObj = this.getVerifyAlternativeBooking(verifyRes)
 
+    // Логируем подробно для отладки
+    this.logger.debug(
+      `quickBook verify result:\n` +
+      `  - booking type: ${Array.isArray(verifyRes?.booking) ? 'array' : typeof verifyRes?.booking}\n` +
+      `  - booking length: ${Array.isArray(verifyRes?.booking) ? (verifyRes.booking as any[]).length : 'N/A'}\n` +
+      `  - bookingToken: ${!!bookingToken?.createBookingToken}\n` +
+      `  - alternativeBooking type: ${Array.isArray(verifyRes?.alternativeBooking) ? 'array' : typeof verifyRes?.alternativeBooking}\n` +
+      `  - alternativeBooking length: ${Array.isArray(verifyRes?.alternativeBooking) ? (verifyRes.alternativeBooking as any[]).length : 'N/A'}\n` +
+      `  - alternativeToken: ${!!alternativeTokenObj?.createBookingToken}`
+    )
+
+    // Если нет ни одного токена - нет доступности
     if (!bookingToken?.createBookingToken && !alternativeTokenObj?.createBookingToken) {
+      this.logger.warn(`quickBook: no tokens returned, no availability`)
       return {
         verify: verifyRes,
         created: null,
         priceChanged: false,
+        noAvailability: true,
+        message:
+          (verifyRes?.warnings?.[0]?.message as string) ||
+          'Номера по выбранным условиям закончились. Выполните повторный поиск.',
+        warnings: verifyRes?.warnings,
       }
     }
 
-    if (!bookingToken?.createBookingToken && alternativeTokenObj?.createBookingToken) {
+    // ПРИОРИТЕТ: если есть alternativeToken - значит цена/условия изменились
+    // НЕ создаём бронь, возвращаем информацию для подтверждения пользователем
+    if (alternativeTokenObj?.createBookingToken) {
       const originalPrice =
         roomStay?.total?.priceBeforeTax ?? roomStay?.total?.priceAfterTax ?? null
       const alternativePrice = this.extractPriceFromVerifyResult(alternativeTokenObj)
       const currencyCode = roomStay?.currencyCode ?? 'RUB'
 
-      this.logger.log(
-        `Price/availability changed for property ${propertyId}: ${originalPrice} -> ${alternativePrice} ${currencyCode}`,
+      this.logger.warn(
+        `quickBook: price/availability changed (${originalPrice} -> ${alternativePrice} ${currencyCode}), NOT creating booking`,
       )
 
       return {
@@ -835,7 +901,48 @@ export class ReservationService {
       }
     }
 
-    const token = bookingToken!.createBookingToken
+    // Защитный сценарий:
+    // even if verify вернул bookingToken, при mismatch checksum НЕ создаём бронь автоматически,
+    // а требуем явного подтверждения пользователем (как при alternativeBooking).
+    if (
+      bookingToken?.createBookingToken &&
+      !alternativeTokenObj?.createBookingToken &&
+      (hydratedRoomStay as any)?.__checksumMismatch
+    ) {
+      const originalPrice =
+        roomStay?.total?.priceBeforeTax ?? roomStay?.total?.priceAfterTax ?? null
+      const verifiedPrice = this.extractPriceFromVerifyResult(bookingToken)
+      const currencyCode = roomStay?.currencyCode ?? 'RUB'
+
+      this.logger.warn(
+        `quickBook: checksum mismatch detected, requiring confirmation (${originalPrice} -> ${verifiedPrice} ${currencyCode})`,
+      )
+
+      return {
+        verify: verifyRes,
+        created: null,
+        priceChanged: true,
+        originalPrice,
+        alternativePrice: verifiedPrice,
+        priceDifference:
+          verifiedPrice != null && originalPrice != null
+            ? verifiedPrice - originalPrice
+            : null,
+        currencyCode,
+        // используем валидный create-токен из verify для подтверждения новых условий
+        alternativeToken: bookingToken.createBookingToken,
+        warnings: verifyRes.warnings,
+      }
+    }
+
+    // Если есть обычный bookingToken (без alternative) - цена НЕ изменилась, создаём бронь
+    if (!bookingToken?.createBookingToken) {
+      this.logger.error(`quickBook: unexpected state - no bookingToken but no alternativeToken`)
+      throw new Error('Unexpected verify result: no tokens available')
+    }
+
+    const token = bookingToken.createBookingToken
+    this.logger.log(`quickBook: price NOT changed, proceeding to create booking`)
 
     // 6) CREATE
     const createPayload: CreateBookingRequest = {
@@ -855,7 +962,32 @@ export class ReservationService {
   }
 
   /**
-   * Создание брони с уже полученным токеном (для подтверждения альтернативных условий)
+   * Нормализация roomStay из запроса (RoomOffer-формат) в вид для buildRoomStayRq без запросов к API.
+   * Используется при создании брони по alternativeToken, чтобы не делать повторный verify/search.
+   */
+  private normalizeRoomStayForCreate(rs: any): TLRoomStay {
+    const roomTypeId = rs?.roomType?.id ?? rs?.roomTypeId ?? ''
+    const ratePlanId = (rs as any)?.ratePlan?.id ?? (rs as any)?.ratePlanId ?? ''
+    const placements = rs?.roomType?.placements ?? rs?.placements ?? []
+    return {
+      propertyId: (rs as any)?.propertyId ?? '',
+      roomType: {
+        id: roomTypeId,
+        name: (rs as any)?.roomTypeName,
+        placements: Array.isArray(placements) ? placements : [],
+      },
+      ratePlan: { id: ratePlanId },
+      checksum: (rs as any)?.checksum ?? '',
+      body: this.hasNonEmptyBody((rs as any)?.body) ? (rs as any).body : {},
+      total: (rs as any)?.total ?? { priceBeforeTax: (rs as any)?.price?.total, priceAfterTax: (rs as any)?.price?.total },
+      currencyCode: (rs as any)?.currencyCode ?? (rs as any)?.price?.currency ?? 'RUB',
+    } as TLRoomStay
+  }
+
+  /**
+   * Создание брони с уже полученным токеном (для подтверждения альтернативных условий).
+   * ВАЖНО: alternativeToken - это createBookingToken, готовый для создания брони.
+   * Повторный verify/search не вызывается — используем только переданный roomStay и токен.
    */
   private async createBookingWithToken(params: {
     propertyId: string
@@ -897,16 +1029,24 @@ export class ReservationService {
       token,
     } = params
 
-    const hydratedRoomStay = await this.hydrateRoomStay({
-      roomStay,
-      propertyId,
-      arrival,
-      departure,
-      guestsCount,
-    })
-
+    // Нормализация переданного roomStay.
+    // Если body пустой, догидрируем из Search API (без verify) для валидного create payload.
+    this.logChecksumDebug('createWithToken incoming roomStay', roomStay?.checksum)
+    let normalizedRoomStay = this.normalizeRoomStayForCreate(roomStay)
+    if (!this.hasNonEmptyBody((normalizedRoomStay as any)?.body)) {
+      this.logger.warn(
+        `createBookingWithToken: roomStay.body is empty, hydrating from search for valid create payload`,
+      )
+      normalizedRoomStay = await this.hydrateRoomStay({
+        roomStay,
+        propertyId,
+        arrival,
+        departure,
+        guestsCount,
+      })
+    }
     const stayDates = this.buildStayDatesFromRoomStay(
-      hydratedRoomStay,
+      normalizedRoomStay,
       arrival,
       departure,
       checkInTime,
@@ -914,8 +1054,9 @@ export class ReservationService {
     )
 
     const roomStaysRq: BookingRoomStayRq[] = [
-      this.buildRoomStayRq(hydratedRoomStay, stayDates, guestsCount, guests),
+      this.buildRoomStayRq(normalizedRoomStay, stayDates, guestsCount, guests),
     ]
+    this.logChecksumDebug('createWithToken outgoing create roomStay', roomStaysRq[0]?.checksum)
 
     const bookingCustomer: BookingCustomer = {
       firstName: customer.firstName,
@@ -928,11 +1069,10 @@ export class ReservationService {
       comment: customer.comment,
     }
 
-    // prepayment — всегда передаём сумму предоплаты для отчётов TravelLine
     const resolvedPrepaySum =
       prepaySum ??
-      hydratedRoomStay?.total?.priceBeforeTax ??
-      hydratedRoomStay?.total?.priceAfterTax ??
+      (roomStay as any)?.total?.priceBeforeTax ??
+      (roomStay as any)?.total?.priceAfterTax ??
       (roomStay as any)?.price?.total ??
       undefined
     const prepayment: BookingPrepayment = {
@@ -952,7 +1092,20 @@ export class ReservationService {
       },
     }
 
+    this.logger.log(
+      `createBookingWithToken: creating booking with provided alternativeToken (no re-verify)`,
+    )
+
     const created = await this.createBooking(createPayload)
+
+    // Проверяем, что бронь действительно создана
+    if (!created?.booking?.number) {
+      throw new Error('Booking created but no booking number returned')
+    }
+
+    this.logger.log(
+      `createBookingWithToken: booking created successfully, number=${created.booking.number}`
+    )
 
     return { verify: null, created, priceChanged: false, acceptedAlternative: true }
   }
@@ -1301,15 +1454,32 @@ export class ReservationService {
   }
 
   /**
-   * Нормализация ответа verify: API может вернуть booking/alternativeBooking как массив.
+   * Нормализация ответа verify: API может вернуть booking/alternativeBooking как массив или объект.
    * Возвращаем один объект или null.
+   *
+   * ВАЖНО: TravelLine может вернуть:
+   * - Объект с токеном: { createBookingToken: "...", ... }
+   * - Массив с одним объектом: [{ createBookingToken: "...", ... }]
+   * - Пустой массив: [] (означает "нет варианта")
+   * - null/undefined (означает "нет варианта")
    */
   private normalizeVerifyBooking(
     raw: VerifyBookingRs | VerifyBookingRs[] | null | undefined,
   ): VerifyBookingRs | null {
     if (raw == null) return null
-    if (Array.isArray(raw)) return raw[0] ?? null
-    return raw
+
+    // Если массив
+    if (Array.isArray(raw)) {
+      // Пустой массив = нет варианта
+      if (raw.length === 0) return null
+      // Берём первый элемент
+      const first = raw[0]
+      // Проверяем, что у него есть токен
+      return first?.createBookingToken ? first : null
+    }
+
+    // Если объект - проверяем наличие токена
+    return (raw as any)?.createBookingToken ? raw : null
   }
 
   private getVerifyBookingToken(res: VerifyBookingResult | null | undefined): VerifyBookingRs | null {
@@ -1324,14 +1494,22 @@ export class ReservationService {
 
   /** Извлечение стоимости проживания (subtotal) без налогов — для предоплаты и отображения */
   private extractPriceFromVerifyResult(verifyRs: VerifyBookingRs): number | null {
-    const booking = verifyRs as any
-    return (
-      booking?.total?.priceBeforeTax ??
-      booking?.total?.priceAfterTax ??
-      booking?.roomStays?.[0]?.total?.priceBeforeTax ??
-      booking?.roomStays?.[0]?.total?.priceAfterTax ??
+    const b = verifyRs as any
+    const num =
+      b?.total?.priceBeforeTax ??
+      b?.total?.priceAfterTax ??
+      b?.roomStays?.[0]?.total?.priceBeforeTax ??
+      b?.roomStays?.[0]?.total?.priceAfterTax ??
       null
-    )
+    if (num != null) return typeof num === 'number' ? num : null
+    // TravelLine иногда отдаёт сумму строкой (например в alternativeBooking)
+    const str =
+      b?.total?.amount ?? b?.roomStays?.[0]?.total?.amount ?? b?.TotalAmountAfterTax
+    if (str != null) {
+      const parsed = typeof str === 'string' ? parseFloat(str) : Number(str)
+      return Number.isFinite(parsed) ? parsed : null
+    }
+    return null
   }
 
   private extractApiErrors(
@@ -1377,5 +1555,73 @@ export class ReservationService {
 
     this.logger.error(`Unexpected error in ${context}`, error as Error)
     throw error instanceof Error ? error : new Error(String(error))
+  }
+
+  /**
+   * [DEV ONLY] Эмуляция сценария изменения цены для локального теста.
+   * Принимает тело как для quick-book + опционально overrideChecksum.
+   * Если передан overrideChecksum — подменяет roomStay.checksum перед вызовом quickBook,
+   * чтобы TravelLine вернул пустой booking и актуальное предложение в alternativeBooking.
+   */
+  async testPriceChangeScenario(body: {
+    propertyId: string
+    roomStay: any
+    arrival: string
+    departure: string
+    guestsCount: { adultCount: number; childAges?: number[] }
+    customer: {
+      firstName: string
+      lastName: string
+      phone: string
+      email: string
+      citizenship?: string
+      comment?: string
+    }
+    guests?: Array<{ firstName: string; lastName: string; middleName?: string; citizenship?: string }>
+    checkInTime?: string
+    checkOutTime?: string
+    paymentType?: 'Cash' | 'PrePay'
+    prepayRemark?: string | null
+    prepaySum?: number | null
+    perBookingServices?: Array<{ id: string }>
+    /** Подмена checksum для эмуляции изменения цены (Base64 JSON с другой TotalAmountAfterTax) */
+    overrideChecksum?: string
+  }) {
+    const { overrideChecksum, ...rest } = body
+    const roomStay =
+      overrideChecksum && body.roomStay
+        ? { ...body.roomStay, checksum: overrideChecksum }
+        : body.roomStay
+    return this.quickBook({ ...rest, roomStay })
+  }
+
+  private decodeChecksumAmounts(
+    checksum?: string | null,
+  ): { withoutExtras: string | null; withExtras: string | null } | null {
+    if (!checksum) return null
+    try {
+      const raw = Buffer.from(checksum, 'base64').toString('utf-8')
+      const parsed = JSON.parse(raw)
+      return {
+        withoutExtras:
+          parsed?.ChecksumWithOutExtras?.TotalAmountAfterTax?.toString?.() ?? null,
+        withExtras:
+          parsed?.ChecksumWithExtras?.TotalAmountAfterTax?.toString?.() ?? null,
+      }
+    } catch {
+      return null
+    }
+  }
+
+  private logChecksumDebug(scope: string, checksum?: string | null) {
+    if (!checksum) {
+      this.logger.debug(`${scope}: checksum is empty`)
+      return
+    }
+    const decoded = this.decodeChecksumAmounts(checksum)
+    this.logger.debug(
+      `${scope}: checksum=${checksum.slice(0, 24)}... len=${checksum.length}; ` +
+        `withoutExtras=${decoded?.withoutExtras ?? 'n/a'}, withExtras=${decoded?.withExtras ?? 'n/a'}`,
+    )
   }
 }
