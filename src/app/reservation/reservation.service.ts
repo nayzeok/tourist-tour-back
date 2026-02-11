@@ -18,6 +18,8 @@ const PENDING_BOOKING_PREFIX = 'pending-booking:'
 const PENDING_BOOKING_TTL_SEC = 60 * 60 // 60 минут (запас на долгую оплату)
 const PAYMENT_SUCCESS_PREFIX = 'payment-success:'
 const PAYMENT_SUCCESS_TTL_SEC = 60 * 60 // 1 час
+const ALT_ROOMSTAY_PREFIX = 'alt-roomstay:'
+const ALT_ROOMSTAY_TTL_SEC = 30 * 60 // 30 минут
 
 /**
  * --- Минимальные типы под Reservation API (по твоему OpenAPI) ---
@@ -880,6 +882,9 @@ export class ReservationService {
         roomStay?.total?.priceBeforeTax ?? roomStay?.total?.priceAfterTax ?? null
       const alternativePrice = this.extractPriceFromVerifyResult(alternativeTokenObj)
       const currencyCode = roomStay?.currencyCode ?? 'RUB'
+      const alternativeToken = alternativeTokenObj.createBookingToken
+
+      await this.cacheAlternativeRoomStay(alternativeToken, hydratedRoomStay)
 
       this.logger.warn(
         `quickBook: price/availability changed (${originalPrice} -> ${alternativePrice} ${currencyCode}), NOT creating booking`,
@@ -896,7 +901,7 @@ export class ReservationService {
             ? alternativePrice - originalPrice
             : null,
         currencyCode,
-        alternativeToken: alternativeTokenObj.createBookingToken,
+        alternativeToken,
         warnings: verifyRes.warnings,
       }
     }
@@ -917,6 +922,8 @@ export class ReservationService {
       this.logger.warn(
         `quickBook: checksum mismatch detected, requiring confirmation (${originalPrice} -> ${verifiedPrice} ${currencyCode})`,
       )
+      const alternativeToken = bookingToken.createBookingToken
+      await this.cacheAlternativeRoomStay(alternativeToken, hydratedRoomStay)
 
       return {
         verify: verifyRes,
@@ -930,7 +937,7 @@ export class ReservationService {
             : null,
         currencyCode,
         // используем валидный create-токен из verify для подтверждения новых условий
-        alternativeToken: bookingToken.createBookingToken,
+        alternativeToken,
         warnings: verifyRes.warnings,
       }
     }
@@ -1032,8 +1039,16 @@ export class ReservationService {
     // Нормализация переданного roomStay.
     // Если body пустой, догидрируем из Search API (без verify) для валидного create payload.
     this.logChecksumDebug('createWithToken incoming roomStay', roomStay?.checksum)
-    let normalizedRoomStay = this.normalizeRoomStayForCreate(roomStay)
-    if (!this.hasNonEmptyBody((normalizedRoomStay as any)?.body)) {
+    const cachedHydratedRoomStay = await this.getCachedAlternativeRoomStay(token)
+    let normalizedRoomStay = cachedHydratedRoomStay
+      ? (cachedHydratedRoomStay as TLRoomStay)
+      : this.normalizeRoomStayForCreate(roomStay)
+
+    if (cachedHydratedRoomStay) {
+      this.logger.log(
+        `createBookingWithToken: using cached hydrated roomStay from verify (no re-search)`,
+      )
+    } else if (!this.hasNonEmptyBody((normalizedRoomStay as any)?.body)) {
       this.logger.warn(
         `createBookingWithToken: roomStay.body is empty, hydrating from search for valid create payload`,
       )
@@ -1623,5 +1638,21 @@ export class ReservationService {
       `${scope}: checksum=${checksum.slice(0, 24)}... len=${checksum.length}; ` +
         `withoutExtras=${decoded?.withoutExtras ?? 'n/a'}, withExtras=${decoded?.withExtras ?? 'n/a'}`,
     )
+  }
+
+  private getAltRoomStayCacheKey(token: string) {
+    return `${ALT_ROOMSTAY_PREFIX}${encodeURIComponent(token)}`
+  }
+
+  private async cacheAlternativeRoomStay(token: string, roomStay: TLRoomStay) {
+    await this.redis.setJson(
+      this.getAltRoomStayCacheKey(token),
+      roomStay,
+      ALT_ROOMSTAY_TTL_SEC,
+    )
+  }
+
+  private async getCachedAlternativeRoomStay(token: string): Promise<TLRoomStay | null> {
+    return this.redis.getJson<TLRoomStay>(this.getAltRoomStayCacheKey(token))
   }
 }
