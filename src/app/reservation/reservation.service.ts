@@ -782,25 +782,33 @@ export class ReservationService {
       return result
     }
 
-    // 2) один RoomStayRq из выбора
-    const hydratedRoomStay = await this.hydrateRoomStay({
-      roomStay,
-      propertyId,
-      arrival,
-      departure,
-      guestsCount,
-    })
+    // 2) Формируем roomStay без предварительного search-запроса.
+    // Если verify вернёт ошибку "body field is required", сделаем hydrate + retry один раз.
+    let effectiveRoomStay: TLRoomStay = this.normalizeRoomStayForCreate(roomStay)
+    const incomingChecksumAmounts = this.decodeChecksumAmounts(roomStay?.checksum)
+    const incomingChecksumTotal = Number(
+      incomingChecksumAmounts?.withoutExtras ?? incomingChecksumAmounts?.withExtras ?? NaN,
+    )
+    const incomingDisplayedPrice =
+      roomStay?.total?.priceBeforeTax ??
+      roomStay?.total?.priceAfterTax ??
+      (roomStay as any)?.price?.total ??
+      null
+    let checksumMismatchDetected =
+      Number.isFinite(incomingChecksumTotal) &&
+      incomingDisplayedPrice != null &&
+      Math.abs(incomingChecksumTotal - Number(incomingDisplayedPrice)) > 0.009
 
-    const stayDates = this.buildStayDatesFromRoomStay(
-      hydratedRoomStay,
+    let stayDates = this.buildStayDatesFromRoomStay(
+      effectiveRoomStay,
       arrival,
       departure,
       checkInTime,
       checkOutTime,
     )
 
-    const roomStaysRq: BookingRoomStayRq[] = [
-      this.buildRoomStayRq(hydratedRoomStay, stayDates, guestsCount, guests),
+    let roomStaysRq: BookingRoomStayRq[] = [
+      this.buildRoomStayRq(effectiveRoomStay, stayDates, guestsCount, guests),
     ]
     this.logChecksumDebug('quickBook outgoing verify roomStay', roomStaysRq[0]?.checksum)
 
@@ -821,20 +829,20 @@ export class ReservationService {
     }
 
     // 4) prepayment — всегда передаём сумму предоплаты, чтобы TravelLine видел её в отчётах
-    const resolvedPrepaySum =
+    let resolvedPrepaySum =
       prepaySum ??
-      hydratedRoomStay?.total?.priceBeforeTax ??
-      hydratedRoomStay?.total?.priceAfterTax ??
+      effectiveRoomStay?.total?.priceBeforeTax ??
+      effectiveRoomStay?.total?.priceAfterTax ??
       (roomStay as any)?.price?.total ??
       undefined
-    const prepayment: BookingPrepayment = {
+    let prepayment: BookingPrepayment = {
       paymentType: paymentType ?? 'PrePay',
       remark: prepayRemark ?? undefined,
       prepaidSum: resolvedPrepaySum,
     }
 
     // 5) VERIFY (получить createBookingToken)
-    const verifyPayload: VerifyBookingRequest = {
+    let verifyPayload: VerifyBookingRequest = {
       booking: {
         propertyId,
         roomStays: roomStaysRq,
@@ -844,7 +852,64 @@ export class ReservationService {
       },
     }
 
-    const verifyRes = await this.verifyBooking(verifyPayload)
+    let verifyRes: VerifyBookingResult
+    try {
+      verifyRes = await this.verifyBooking(verifyPayload)
+    } catch (error) {
+      if (!this.isBodyRequiredError(error)) {
+        throw error
+      }
+      this.logger.warn(
+        `quickBook: verify requires non-empty body, hydrating roomStay and retrying verify once`,
+      )
+
+      effectiveRoomStay = await this.hydrateRoomStay({
+        roomStay,
+        propertyId,
+        arrival,
+        departure,
+        guestsCount,
+      })
+      checksumMismatchDetected =
+        checksumMismatchDetected || !!(effectiveRoomStay as any)?.__checksumMismatch
+
+      stayDates = this.buildStayDatesFromRoomStay(
+        effectiveRoomStay,
+        arrival,
+        departure,
+        checkInTime,
+        checkOutTime,
+      )
+      roomStaysRq = [
+        this.buildRoomStayRq(effectiveRoomStay, stayDates, guestsCount, guests),
+      ]
+      this.logChecksumDebug('quickBook outgoing verify roomStay (retry)', roomStaysRq[0]?.checksum)
+      this.logger.debug(
+        `roomStay request for verify (retry): ${JSON.stringify(roomStaysRq[0], null, 2)}`,
+      )
+
+      resolvedPrepaySum =
+        prepaySum ??
+        effectiveRoomStay?.total?.priceBeforeTax ??
+        effectiveRoomStay?.total?.priceAfterTax ??
+        (roomStay as any)?.price?.total ??
+        undefined
+      prepayment = {
+        paymentType: paymentType ?? 'PrePay',
+        remark: prepayRemark ?? undefined,
+        prepaidSum: resolvedPrepaySum,
+      }
+      verifyPayload = {
+        booking: {
+          propertyId,
+          roomStays: roomStaysRq,
+          customer: bookingCustomer,
+          prepayment,
+          services: perBookingServices ?? null,
+        },
+      }
+      verifyRes = await this.verifyBooking(verifyPayload)
+    }
 
     const bookingToken = this.getVerifyBookingToken(verifyRes)
     const alternativeTokenObj = this.getVerifyAlternativeBooking(verifyRes)
@@ -884,7 +949,7 @@ export class ReservationService {
       const currencyCode = roomStay?.currencyCode ?? 'RUB'
       const alternativeToken = alternativeTokenObj.createBookingToken
 
-      await this.cacheAlternativeRoomStay(alternativeToken, hydratedRoomStay)
+      await this.cacheAlternativeRoomStay(alternativeToken, effectiveRoomStay)
 
       this.logger.warn(
         `quickBook: price/availability changed (${originalPrice} -> ${alternativePrice} ${currencyCode}), NOT creating booking`,
@@ -912,18 +977,19 @@ export class ReservationService {
     if (
       bookingToken?.createBookingToken &&
       !alternativeTokenObj?.createBookingToken &&
-      (hydratedRoomStay as any)?.__checksumMismatch
+      ((effectiveRoomStay as any)?.__checksumMismatch || checksumMismatchDetected)
     ) {
+      const verifiedBookingToken = bookingToken as VerifyBookingRs
       const originalPrice =
         roomStay?.total?.priceBeforeTax ?? roomStay?.total?.priceAfterTax ?? null
-      const verifiedPrice = this.extractPriceFromVerifyResult(bookingToken)
+      const verifiedPrice = this.extractPriceFromVerifyResult(verifiedBookingToken)
       const currencyCode = roomStay?.currencyCode ?? 'RUB'
 
       this.logger.warn(
         `quickBook: checksum mismatch detected, requiring confirmation (${originalPrice} -> ${verifiedPrice} ${currencyCode})`,
       )
-      const alternativeToken = bookingToken.createBookingToken
-      await this.cacheAlternativeRoomStay(alternativeToken, hydratedRoomStay)
+      const alternativeToken = verifiedBookingToken.createBookingToken
+      await this.cacheAlternativeRoomStay(alternativeToken, effectiveRoomStay)
 
       return {
         verify: verifyRes,
@@ -1640,11 +1706,32 @@ export class ReservationService {
     )
   }
 
+  private isBodyRequiredError(error: unknown): boolean {
+    const pattern = /body field is required/i
+    if (error instanceof HttpException) {
+      const response = error.getResponse() as any
+      const messageValue =
+        typeof response === 'string'
+          ? response
+          : Array.isArray(response?.message)
+            ? response.message.join('; ')
+            : response?.message ?? error.message
+      return pattern.test(String(messageValue ?? ''))
+    }
+    if (error instanceof Error) {
+      return pattern.test(error.message)
+    }
+    return false
+  }
+
   private getAltRoomStayCacheKey(token: string) {
     return `${ALT_ROOMSTAY_PREFIX}${encodeURIComponent(token)}`
   }
 
   private async cacheAlternativeRoomStay(token: string, roomStay: TLRoomStay) {
+    this.logger.debug(
+      `alt-roomstay cache set: token=${token.slice(0, 16)}..., hasBody=${this.hasNonEmptyBody((roomStay as any)?.body)}`,
+    )
     await this.redis.setJson(
       this.getAltRoomStayCacheKey(token),
       roomStay,
@@ -1653,6 +1740,10 @@ export class ReservationService {
   }
 
   private async getCachedAlternativeRoomStay(token: string): Promise<TLRoomStay | null> {
-    return this.redis.getJson<TLRoomStay>(this.getAltRoomStayCacheKey(token))
+    const cached = await this.redis.getJson<TLRoomStay>(this.getAltRoomStayCacheKey(token))
+    this.logger.debug(
+      `alt-roomstay cache ${cached ? 'hit' : 'miss'}: token=${token.slice(0, 16)}...`,
+    )
+    return cached
   }
 }
