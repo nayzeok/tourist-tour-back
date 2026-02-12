@@ -1124,6 +1124,18 @@ export class ReservationService {
       this.logger.log(
         `createBookingWithToken: using cached hydrated roomStay from verify (no re-search)`,
       )
+      if (!this.hasNonEmptyBody((normalizedRoomStay as any)?.body)) {
+        this.logger.warn(
+          `createBookingWithToken: cached roomStay has empty body, hydrating from search for valid create payload`,
+        )
+        normalizedRoomStay = await this.hydrateRoomStay({
+          roomStay,
+          propertyId,
+          arrival,
+          departure,
+          guestsCount,
+        })
+      }
     } else if (!this.hasNonEmptyBody((normalizedRoomStay as any)?.body)) {
       this.logger.warn(
         `createBookingWithToken: roomStay.body is empty, hydrating from search for valid create payload`,
@@ -1162,6 +1174,9 @@ export class ReservationService {
 
     const resolvedPrepaySum =
       prepaySum ??
+      (normalizedRoomStay as any)?.total?.priceBeforeTax ??
+      (normalizedRoomStay as any)?.total?.priceAfterTax ??
+      (normalizedRoomStay as any)?.price?.total ??
       (roomStay as any)?.total?.priceBeforeTax ??
       (roomStay as any)?.total?.priceAfterTax ??
       (roomStay as any)?.price?.total ??
