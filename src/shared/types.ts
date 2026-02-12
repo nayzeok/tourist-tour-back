@@ -87,6 +87,11 @@ export type RoomOffer = {
   placements?: Array<{ kind?: string; code?: string; count: number }>
   /** Непрозрачное поле из Search API — требуется для verify/create */
   body?: unknown
+  /** Даты/время из Search API — используем для verify/create без дополнительного hydrate */
+  stayDates?: {
+    arrivalDateTime?: string
+    departureDateTime?: string
+  }
   // Политика отмены (полная информация)
   cancellationPolicy: {
     freeCancellationPossible: boolean

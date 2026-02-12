@@ -234,12 +234,15 @@ export class ReservationService {
     let departureDateTime =
       (roomStay as any)?.stayDates?.departureDateTime ?? departure
 
-    // Заезд: подставляем дефолтное время отеля (из Content API), если нет — оставляем дату, TravelLine подставит своё.
-    if (arrivalDateTime && !arrivalDateTime.includes('T') && checkInTime) {
-      arrivalDateTime = `${arrivalDateTime}T${checkInTime}`
+    // Заезд: время НЕ подставляем.
+    // TravelLine ожидает дефолтное время заезда отеля и при передаче "чужого" времени
+    // возвращает "Check-in time should be the default time".
+    // Передаём только дату — API подставит default check-in самостоятельно.
+    // Выезд: если время не пришло из roomStay, подставляем дефолтное время отеля из запроса.
+    // Это убирает лишний retry verify в кейсах, где API отклоняет дату без времени.
+    if (departureDateTime && !departureDateTime.includes('T') && checkOutTime) {
+      departureDateTime = `${departureDateTime}T${checkOutTime}`
     }
-    // Выезд: время НЕ подставляем — API требует именно дефолтное время выезда и сам его подставит к дате.
-    // Явная передача checkOutTime приводит к ошибке "Check-out time should be the default time".
 
     return {
       arrivalDateTime,
@@ -434,6 +437,9 @@ export class ReservationService {
 
     const url = `${baseUrl}?${qs.toString()}`
     try {
+      this.logger.debug(
+        `OUTBOUND search call (GET) -> ${url}`,
+      )
       const resp = await this.oauth.get<{ roomStays: TLRoomStay[] }>(url)
       if (resp?.roomStays?.length) {
         return resp.roomStays
@@ -442,6 +448,9 @@ export class ReservationService {
       // fallback to POST below
     }
 
+    this.logger.debug(
+      `OUTBOUND search call (POST) -> ${baseUrl} adults=${guestsCount.adultCount} arrival=${arrival} departure=${departure} currency=${currency}`,
+    )
     const altResp = await this.oauth.post<{ roomStays: TLRoomStay[] }>(
       baseUrl,
       {
@@ -1044,6 +1053,7 @@ export class ReservationService {
     const placements = rs?.roomType?.placements ?? rs?.placements ?? []
     return {
       propertyId: (rs as any)?.propertyId ?? '',
+      stayDates: (rs as any)?.stayDates ?? undefined,
       roomType: {
         id: roomTypeId,
         name: (rs as any)?.roomTypeName,

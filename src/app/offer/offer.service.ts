@@ -176,6 +176,7 @@ export class OfferService {
       checksum: (rs as any)?.checksum ?? undefined,
       placements: rs.roomType?.placements ?? [],
       body: (rs as any)?.body ?? undefined,
+      stayDates: (rs as any)?.stayDates ?? undefined,
       cancellationPolicy,
     }
   }
