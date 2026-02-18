@@ -51,6 +51,77 @@ export class AuthService {
     return password.slice(0, length)
   }
 
+  private getSiteUrl() {
+    const raw =
+      this.configService.get<string>('SITE_URL') ||
+      this.configService.get<string>('FRONTEND_URL') ||
+      'https://tourist-tours.ru'
+    return raw.replace(/\/+$/, '')
+  }
+
+  private getDisplayName(details: {
+    email: string
+    firstName?: string | null
+    lastName?: string | null
+  }) {
+    const fullName = [details.firstName, details.lastName]
+      .filter(Boolean)
+      .join(' ')
+      .trim()
+    if (fullName) return fullName
+    return details.email
+  }
+
+  private buildWelcomeTemplateVariables(details: {
+    email: string
+    firstName?: string | null
+    lastName?: string | null
+    tempPassword?: string
+  }) {
+    const siteUrl = this.getSiteUrl()
+    return {
+      name: this.getDisplayName(details),
+      email: details.email,
+      temp_password: details.tempPassword ?? '',
+      login_url: `${siteUrl}/acc`,
+      support_email:
+        this.configService.get<string>('SUPPORT_EMAIL') ??
+        'support@tourist-tours.ru',
+      current_year: new Date().getFullYear(),
+      unsubscribe_url:
+        this.configService.get<string>('RUSENDER_UNSUBSCRIBE_URL') ??
+        `${siteUrl}/unsubscribe`,
+    }
+  }
+
+  private buildPasswordResetTemplateVariables(details: {
+    email: string
+    firstName?: string | null
+    lastName?: string | null
+  }) {
+    const siteUrl = this.getSiteUrl()
+    return {
+      name: this.getDisplayName({
+        email: details.email,
+        firstName: details.firstName,
+        lastName: details.lastName,
+      }),
+      email: details.email,
+      reset_ttl:
+        this.configService.get<string>('RESET_PASSWORD_TTL') ??
+        '15 минут',
+      // Текущий flow создает временный пароль сразу, отдельного reset-token URL пока нет.
+      reset_url: `${siteUrl}/acc`,
+      support_email:
+        this.configService.get<string>('SUPPORT_EMAIL') ??
+        'support@tourist-tours.ru',
+      current_year: new Date().getFullYear(),
+      unsubscribe_url:
+        this.configService.get<string>('RUSENDER_UNSUBSCRIBE_URL') ??
+        `${siteUrl}/unsubscribe`,
+    }
+  }
+
   hashPassword(raw: string) {
     return bcrypt.hash(raw, SALT_ROUNDS)
   }
@@ -69,6 +140,9 @@ export class AuthService {
 
     const newPassword = this.generatePassword()
     const passwordHash = await this.hashPassword(newPassword)
+    const resetTemplateId = this.configService.get<string>(
+      'RUSENDER_TEMPLATE_RESET',
+    )
 
     await this.users.updatePassword(user.id, passwordHash)
 
@@ -76,6 +150,16 @@ export class AuthService {
       to: normalizedEmail,
       subject: 'Ваш пароль для входа',
       text: `Ваш новый пароль: ${newPassword}`,
+      ...(resetTemplateId
+        ? {
+            templateId: resetTemplateId,
+            templateVariables: this.buildPasswordResetTemplateVariables({
+              email: normalizedEmail,
+              firstName: user.firstName,
+              lastName: user.lastName,
+            }),
+          }
+        : {}),
     })
 
     return { password: newPassword, user: this.users.toPublicUser(user) }
@@ -202,6 +286,9 @@ export class AuthService {
     if (!existing) {
       const password = this.generatePassword()
       const passwordHash = await this.hashPassword(password)
+      const welcomeTemplateId = this.configService.get<string>(
+        'RUSENDER_TEMPLATE_WELCOME',
+      )
       const created = await this.users.create({
         email,
         passwordHash,
@@ -214,6 +301,17 @@ export class AuthService {
         to: email,
         subject: 'Ваш аккаунт создан',
         text: `Ваш пароль для входа: ${password}`,
+        ...(welcomeTemplateId
+          ? {
+              templateId: welcomeTemplateId,
+              templateVariables: this.buildWelcomeTemplateVariables({
+                email,
+                firstName: details.firstName,
+                lastName: details.lastName,
+                tempPassword: password,
+              }),
+            }
+          : {}),
       })
 
       return { user: created, isNew: true, password }
@@ -253,6 +351,27 @@ export class AuthService {
       firstName: details.firstName ?? null,
       lastName: details.lastName ?? null,
       phone: details.phone ?? null,
+    })
+
+    const welcomeTemplateId = this.configService.get<string>(
+      'RUSENDER_TEMPLATE_WELCOME',
+    )
+
+    await this.mail.sendMail({
+      to: email,
+      subject: 'Регистрация в Tourist Tours',
+      text: 'Ваш аккаунт успешно создан. Теперь вы можете входить и управлять бронированиями в личном кабинете.',
+      ...(welcomeTemplateId
+        ? {
+            templateId: welcomeTemplateId,
+            templateVariables: this.buildWelcomeTemplateVariables({
+              email,
+              firstName: details.firstName,
+              lastName: details.lastName,
+              tempPassword: details.password,
+            }),
+          }
+        : {}),
     })
 
     return {

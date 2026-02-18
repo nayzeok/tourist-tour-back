@@ -531,10 +531,65 @@ export class ReservationService {
     }
   }
 
+  private formatDateOnlyForEmail(value: Date | null) {
+    if (!value) return null
+    try {
+      return format(value, 'dd.MM.yyyy')
+    } catch {
+      return null
+    }
+  }
+
+  private formatTimeForEmail(value: Date | null) {
+    if (!value) return null
+    try {
+      return format(value, 'HH:mm')
+    } catch {
+      return null
+    }
+  }
+
+  private getNightsCount(arrival: Date | null, departure: Date | null) {
+    if (!arrival || !departure) return null
+    const oneDayMs = 24 * 60 * 60 * 1000
+    const diff = Math.round(
+      (departure.getTime() - arrival.getTime()) / oneDayMs,
+    )
+    return diff > 0 ? diff : null
+  }
+
+  // Шаблон использует форму "ноч{{nights_suffix}}"
+  // 1 -> ночь, 2-4 -> ночи, 5+ -> ночей
+  private getNightsSuffix(nights: number | null) {
+    if (!nights || nights <= 0) return 'ей'
+    const mod10 = nights % 10
+    const mod100 = nights % 100
+    if (mod10 === 1 && mod100 !== 11) return 'ь'
+    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'и'
+    return 'ей'
+  }
+
+  private getSiteUrl() {
+    const raw =
+      process.env.SITE_URL ||
+      process.env.FRONTEND_URL ||
+      'https://tourist-tours.ru'
+    return raw.replace(/\/+$/, '')
+  }
+
   private extractEmail(payload: CreateBookingRequest) {
     return (
       payload?.booking?.customer?.contacts?.emails
         ?.find((email) => email?.emailAddress?.trim())
+        ?.emailAddress?.trim() ?? null
+    )
+  }
+
+  private extractEmailFromCreatedBooking(result?: CreateBookingResult | null) {
+    const bookingAny = result?.booking as any
+    return (
+      bookingAny?.customer?.contacts?.emails
+        ?.find((email: any) => email?.emailAddress?.trim())
         ?.emailAddress?.trim() ?? null
     )
   }
@@ -545,6 +600,65 @@ export class ReservationService {
         ?.find((phone) => phone?.phoneNumber?.trim())
         ?.phoneNumber?.trim() ?? null
     )
+  }
+
+  private async sendCancellationNotification(number: string) {
+    const context = await this.users.getBookingNotificationContext(number)
+    if (!context?.user?.email) {
+      this.logger.warn(
+        `Booking ${number} cancelled but notification email is missing.`,
+      )
+      return
+    }
+
+    const siteUrl = this.getSiteUrl()
+    const cancellationTemplateId = process.env.RUSENDER_TEMPLATE_CANCELLATION
+    const arrival = this.formatDateOnlyForEmail(context.arrivalDate ?? null) ?? ''
+    const departure =
+      this.formatDateOnlyForEmail(context.departureDate ?? null) ?? ''
+    const customerName = [context.user.firstName, context.user.lastName]
+      .filter(Boolean)
+      .join(' ')
+      .trim()
+
+    const textLines = [
+      `Бронирование ${number} отменено.`,
+      arrival && departure ? `Даты: ${arrival} - ${departure}` : null,
+      `Дата отмены: ${this.formatDateForEmail(new Date()) ?? ''}`,
+    ].filter((line): line is string => Boolean(line))
+
+    await this.mail.sendMail({
+      to: context.user.email,
+      subject: `Отмена бронирования ${number}`,
+      text: textLines.join('\n'),
+      ...(cancellationTemplateId
+        ? {
+            templateId: cancellationTemplateId,
+            templateVariables: {
+              booking_id: number,
+              name: customerName || context.user.email,
+              hotel_name: context.propertyId
+                ? `Отель #${context.propertyId}`
+                : 'Отель',
+              check_in_date: arrival,
+              check_out_date: departure,
+              cancellation_date: this.formatDateForEmail(new Date()) ?? '',
+              refund_amount:
+                context.totalAmount != null ? context.totalAmount.toFixed(2) : '',
+              currency: context.currency ?? 'RUB',
+              refund_method: 'На исходный способ оплаты',
+              refund_timeline: '3-10 рабочих дней',
+              rebook_url: `${siteUrl}/hotels`,
+              support_email:
+                process.env.SUPPORT_EMAIL ?? 'support@tourist-tours.ru',
+              current_year: new Date().getFullYear(),
+              unsubscribe_url:
+                process.env.RUSENDER_UNSUBSCRIBE_URL ??
+                `${siteUrl}/unsubscribe`,
+            },
+          }
+        : {}),
+    })
   }
 
   private calcGuestsCount(roomStay?: BookingRoomStayRq) {
@@ -572,10 +686,11 @@ export class ReservationService {
       return
     }
 
-    const email = this.extractEmail(payload)
+    const email =
+      this.extractEmail(payload) || this.extractEmailFromCreatedBooking(result)
     if (!email) {
       this.logger.warn(
-        `Booking ${booking.number} created without customer email. Skipping user creation.`,
+        `Booking ${booking.number} created without customer email in payload/response. Skipping user creation.`,
       )
       return
     }
@@ -629,11 +744,72 @@ export class ReservationService {
       // totalLine,
     ].filter((line): line is string => Boolean(line))
 
+    const nights = this.getNightsCount(arrivalDate, departureDate)
+    const roomType =
+      roomStay?.roomType?.id || (roomStay as any)?.roomType?.name || 'Не указан'
+    const mealPlan =
+      roomStay?.ratePlan?.id || (roomStay as any)?.ratePlan?.name || 'Не указано'
+    const siteUrl = this.getSiteUrl()
+    const bookingTemplateId = process.env.RUSENDER_TEMPLATE_BOOKING
+    const customerName = [customer?.firstName, customer?.lastName]
+      .filter(Boolean)
+      .join(' ')
+      .trim()
+    const paymentStatus =
+      payload?.booking?.prepayment?.paymentType === 'PrePay'
+        ? 'Оплачено'
+        : 'Без оплаты'
+    const cancellationPolicyShort =
+      booking?.cancellationPolicy?.freeCancellationPossible === true
+        ? booking?.cancellationPolicy?.freeCancellationDeadlineLocal
+          ? `Бесплатная отмена до ${booking.cancellationPolicy.freeCancellationDeadlineLocal}`
+          : 'Бесплатная отмена доступна'
+        : booking?.cancellationPolicy?.penaltyAmount != null
+          ? `Штраф ${booking.cancellationPolicy.penaltyAmount} ${booking.currencyCode ?? ''}`.trim()
+          : 'Согласно правилам тарифа'
+
     await this.mail.sendMail({
       to: email,
       subject: `Подтверждение бронирования ${booking.number}`,
       text: lines.join('\n'),
+      ...(bookingTemplateId
+        ? {
+            templateId: bookingTemplateId,
+            templateVariables: {
+              booking_id: booking.number,
+              name: customerName || email,
+              hotel_name: `Отель #${payload.booking.propertyId}`,
+              city: '',
+              check_in_date: this.formatDateOnlyForEmail(arrivalDate) ?? '',
+              check_out_date: this.formatDateOnlyForEmail(departureDate) ?? '',
+              nights: nights ?? '',
+              nights_suffix: this.getNightsSuffix(nights),
+              guests: guestsCount ?? '',
+              room_type: roomType,
+              meal_plan: mealPlan,
+              total_price:
+                totalAmount != null ? totalAmount.toFixed(2) : '',
+              currency: booking.currencyCode ?? 'RUB',
+              payment_status: paymentStatus,
+              check_in_time: this.formatTimeForEmail(arrivalDate) ?? '',
+              check_out_time: this.formatTimeForEmail(departureDate) ?? '',
+              cancellation_policy_short: cancellationPolicyShort,
+              manage_booking_url: `${siteUrl}/acc/orders`,
+              support_email:
+                process.env.SUPPORT_EMAIL ?? 'support@tourist-tours.ru',
+              support_phone: process.env.SUPPORT_PHONE ?? '',
+              current_year: new Date().getFullYear(),
+              unsubscribe_url:
+                process.env.RUSENDER_UNSUBSCRIBE_URL ??
+                `${siteUrl}/unsubscribe`,
+            },
+          }
+        : {}),
     })
+
+    this.logger.log(
+      `Booking confirmation mail flow finished for booking=${booking.number}, email=${email}`,
+    )
   }
 
   /**
@@ -663,6 +839,14 @@ export class ReservationService {
         this.logger.log(`Booking ${number} cancelled, DB status updated to ${newStatus}`)
       } catch (dbErr) {
         this.logger.error(`Failed to update DB status for cancelled booking ${number}: ${dbErr}`)
+      }
+
+      try {
+        await this.sendCancellationNotification(number)
+      } catch (mailErr) {
+        this.logger.error(
+          `Failed to send cancellation email for booking ${number}: ${mailErr}`,
+        )
       }
 
       return result

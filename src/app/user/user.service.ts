@@ -52,6 +52,20 @@ export interface AdminBookingView extends UserBookingView {
   }
 }
 
+export interface BookingNotificationContext {
+  number: string
+  propertyId?: string | null
+  arrivalDate?: Date | null
+  departureDate?: Date | null
+  totalAmount?: number | null
+  currency?: string | null
+  user: {
+    email: string
+    firstName?: string | null
+    lastName?: string | null
+  }
+}
+
 export interface SaveBookingInput {
   number: string
   status: string
@@ -278,5 +292,33 @@ export class UserService {
       where: { number },
       data: { status },
     })
+  }
+
+  async getBookingNotificationContext(
+    number: string,
+  ): Promise<BookingNotificationContext | null> {
+    const booking = await this.db.booking.findFirst({
+      where: { number },
+      include: {
+        user: {
+          select: {
+            email: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
+      },
+    })
+    if (!booking) return null
+
+    return {
+      number: booking.number,
+      propertyId: booking.propertyId,
+      arrivalDate: booking.arrivalDate,
+      departureDate: booking.departureDate,
+      totalAmount: booking.totalAmount,
+      currency: booking.currency,
+      user: booking.user,
+    }
   }
 }
