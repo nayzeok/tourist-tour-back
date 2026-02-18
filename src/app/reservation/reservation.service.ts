@@ -207,7 +207,8 @@ export type VerifyModificationResult = { booking: any }
  */
 @Injectable()
 export class ReservationService {
-  private base = 'https://partner.qatl.ru/api/reservation'
+  private readonly tlBase = (process.env.TL_BASE || 'https://partner.qatl.ru').replace(/\/$/, '')
+  private readonly base = `${this.tlBase}/api/reservation`
   private readonly logger = new Logger(ReservationService.name)
 
   constructor(
@@ -424,7 +425,7 @@ export class ReservationService {
     guestsCount: BookingGuestCount,
     currency: string,
   ): Promise<TLRoomStay[]> {
-    const baseUrl = `https://partner.qatl.ru/api/search/v1/properties/${propertyId}/room-stays`
+    const baseUrl = `${this.tlBase}/api/search/v1/properties/${propertyId}/room-stays`
     const qs = new URLSearchParams({
       adults: String(guestsCount.adultCount),
       arrivalDate: arrival,

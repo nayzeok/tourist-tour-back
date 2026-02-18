@@ -19,6 +19,8 @@ const AGGREGATION_CACHE_TTL_SEC = 120 // 2 мин — повторные зап�
 @Injectable()
 export class SearchService {
   private readonly logger = new Logger(SearchService.name)
+  private readonly tlBase = (process.env.TL_BASE || 'https://partner.qatl.ru').replace(/\/$/, '')
+  private readonly cacheNamespace = this.tlBase.replace(/^https?:\/\//, '')
   /** Дедупликация одновременных вызовов агрегационного поиска по ключу запроса */
   private readonly inFlightAggregation = new Map<
     string,
@@ -122,7 +124,7 @@ export class SearchService {
   // ---------- GEO ----------
 
   private geoCacheKey(cityId: string): string {
-    return `geo:city:${cityId}:properties`
+    return `geo:${this.cacheNamespace}:city:${cityId}:properties`
   }
 
   private async getPropertyIdsByCity(cityId: string): Promise<string[]> {
@@ -136,7 +138,7 @@ export class SearchService {
     }
 
     // Берём из API
-    const url = `https://partner.qatl.ru/api/geo/v1/cities/${cityId}/properties`
+    const url = `${this.tlBase}/api/geo/v1/cities/${cityId}/properties`
     const resp = await this.oauthService.get<TLGeoPropsResp>(url)
     const ids = (resp?.properties ?? []).map((p) => p.id)
 
@@ -150,7 +152,7 @@ export class SearchService {
   // ---------- CONTENT + CACHE ----------
 
   private contentCacheKey(id: string): string {
-    return `hotel:${id}`
+    return `hotel:${this.cacheNamespace}:${id}`
   }
 
   private async getContentForIds(
@@ -189,7 +191,7 @@ export class SearchService {
     id: string,
   ): Promise<TLPropertyContent | null> {
     try {
-      const url = `https://partner.qatl.ru/api/content/v1/properties/${id}`
+      const url = `${this.tlBase}/api/content/v1/properties/${id}`
       const data = await this.oauthService.get<TLPropertyContent>(url)
       // пишем в кэш на сутки
       const cacheKey = this.contentCacheKey(id)
@@ -228,7 +230,7 @@ export class SearchService {
     currency: string,
   ): string {
     const childAges = (guests.childAges ?? []).slice().sort((a, b) => a - b).join(',')
-    return `search:agg:${cityId}:${arrival}:${departure}:${guests.adultCount}:${childAges}:${currency}`
+    return `search:agg:${this.cacheNamespace}:${cityId}:${arrival}:${departure}:${guests.adultCount}:${childAges}:${currency}`
   }
 
   /**
@@ -316,7 +318,7 @@ export class SearchService {
       // console.log(JSON.stringify(body, null, 2))
 
       const resp = await this.oauthService.post<TLSearchAggResp>(
-        'https://partner.qatl.ru/api/search/v1/properties/room-stays/search',
+        `${this.tlBase}/api/search/v1/properties/room-stays/search`,
         body,
       )
 
@@ -332,7 +334,92 @@ export class SearchService {
       }
     }
 
+    // В боевом контуре аггрегатор иногда возвращает пусто при наличии офферов на /properties/{id}/room-stays.
+    // Фоллбек: дотягиваем цены per-property, чтобы список отелей не был пустым.
+    if (out.size === 0 && ids.length > 0) {
+      this.logger.warn('Aggregation returned empty result, using per-property fallback search')
+      return this.getCheapestByPropertyIdsFallback(ids, arrival, departure, guests, currency)
+    }
+
     return out
+  }
+
+  private async getCheapestByPropertyIdsFallback(
+    ids: string[],
+    arrival: string,
+    departure: string,
+    guests: GuestCount,
+    currency: string,
+  ): Promise<Map<string, TLRoomStay>> {
+    const out = new Map<string, TLRoomStay>()
+
+    for (const propertyId of ids) {
+      const roomStays = await this.fetchRoomStaysByProperty(
+        propertyId,
+        arrival,
+        departure,
+        guests,
+        currency,
+      )
+
+      for (const rs of roomStays) {
+        const total = this.rsTotal(rs)
+        const cur = out.get(propertyId)
+        const curTotal = cur ? this.rsTotal(cur) : Number.POSITIVE_INFINITY
+        if (!cur || total < curTotal) {
+          out.set(propertyId, rs)
+        }
+      }
+    }
+
+    return out
+  }
+
+  private async fetchRoomStaysByProperty(
+    propertyId: string,
+    arrival: string,
+    departure: string,
+    guests: GuestCount,
+    currency: string,
+  ): Promise<TLRoomStay[]> {
+    const baseUrl = `${this.tlBase}/api/search/v1/properties/${propertyId}/room-stays`
+    const qs = new URLSearchParams({
+      adults: String(guests.adultCount),
+      arrivalDate: arrival,
+      departureDate: departure,
+      currencyCode: currency,
+    })
+    for (const age of guests.childAges ?? []) {
+      qs.append('childAges', String(age))
+    }
+
+    try {
+      const resp = await this.oauthService.get<{ roomStays: TLRoomStay[] }>(
+        `${baseUrl}?${qs.toString()}`,
+      )
+      if (resp?.roomStays?.length) {
+        return resp.roomStays
+      }
+    } catch {
+      // fallback to POST below
+    }
+
+    const altResp = await this.oauthService.post<{ roomStays: TLRoomStay[] }>(
+      baseUrl,
+      {
+        adults: guests.adultCount,
+        childAges: guests.childAges ?? [],
+        arrivalDate: arrival,
+        departureDate: departure,
+        pricePreference: {
+          currencyCode: currency,
+          minPrice: 0,
+          maxPrice: 100000,
+        },
+      },
+    )
+
+    return altResp?.roomStays ?? []
   }
 
   // ---------- MAPPING ----------

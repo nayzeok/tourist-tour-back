@@ -8,6 +8,7 @@ import { TLPropertyContent } from '~/shared'
 @Injectable()
 export class SyncService {
   private readonly logger = new Logger(SyncService.name)
+  private readonly tlBase = (process.env.TL_BASE || 'https://partner.qatl.ru').replace(/\/$/, '')
   private isSyncing = false
 
   constructor(
@@ -56,10 +57,10 @@ export class SyncService {
     try {
       const [rusCities, gbrCities] = await Promise.all([
         this.oauth.get<{ cities: any[] }>(
-          'https://partner.qatl.ru/api/geo/v1/countries/RUS/cities',
+          `${this.tlBase}/api/geo/v1/countries/RUS/cities`,
         ),
         this.oauth.get<{ cities: any[] }>(
-          'https://partner.qatl.ru/api/geo/v1/countries/GBR/cities',
+          `${this.tlBase}/api/geo/v1/countries/GBR/cities`,
         ),
       ])
 
@@ -127,7 +128,7 @@ export class SyncService {
 
     try {
       // Загружаем свежий контент
-      const url = `https://partner.qatl.ru/api/content/v1/properties/${hotelId}`
+      const url = `${this.tlBase}/api/content/v1/properties/${hotelId}`
       const content = await this.oauth.get<TLPropertyContent>(url)
 
       if (!content) {

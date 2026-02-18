@@ -15,6 +15,7 @@ import { formatRuDate } from '~/utils/date'
 @Injectable()
 export class OfferService {
   private readonly logger = new Logger(OfferService.name)
+  private readonly tlBase = (process.env.TL_BASE || 'https://partner.qatl.ru').replace(/\/$/, '')
   
   // In-flight запросы для дедупликации одновременных вызовов
   private readonly inFlightRequests = new Map<string, Promise<{ roomStays: TLRoomStay[] }>>()
@@ -260,7 +261,7 @@ export class OfferService {
 
     try {
       return await this.oauth.get<{ roomStays: TLRoomStay[] }>(
-        `https://partner.qatl.ru/api/search/v1/properties/${propertyId}/room-stays?${params.toString()}`,
+        `${this.tlBase}/api/search/v1/properties/${propertyId}/room-stays?${params.toString()}`,
       )
     } catch {
       // Фоллбек на POST — на некоторых стендах метод может быть реализован так
@@ -276,7 +277,7 @@ export class OfferService {
         },
       }
       return this.oauth.post<{ roomStays: TLRoomStay[] }>(
-        `https://partner.qatl.ru/api/search/v1/properties/${propertyId}/room-stays`,
+        `${this.tlBase}/api/search/v1/properties/${propertyId}/room-stays`,
         body,
       )
     }

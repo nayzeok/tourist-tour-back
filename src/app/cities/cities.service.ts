@@ -6,6 +6,8 @@ import { ConfigService } from '@nestjs/config'
 
 @Injectable()
 export class CitiesService {
+  private readonly tlBase = (process.env.TL_BASE || 'https://partner.qatl.ru').replace(/\/$/, '')
+
   constructor(
     private readonly db: DbService,
     private readonly redisService: RedisService,
@@ -28,10 +30,10 @@ export class CitiesService {
         // Используем OAuthService для авторизованных запросов
         const cities = await Promise.all([
           this.oauthService.get(
-            'https://partner.qatl.ru/api/geo/v1/countries/RUS/cities',
+            `${this.tlBase}/api/geo/v1/countries/RUS/cities`,
           ),
           this.oauthService.get(
-            'https://partner.qatl.ru/api/geo/v1/countries/GBR/cities',
+            `${this.tlBase}/api/geo/v1/countries/GBR/cities`,
           ),
         ])
 
@@ -73,7 +75,7 @@ export class CitiesService {
   async postExampleData(payload: any) {
     // Пример POST запроса через OAuth
     const result = await this.oauthService.post(
-      'https://partner.qatl.ru/api/some-endpoint',
+      `${this.tlBase}/api/some-endpoint`,
       payload,
     )
 
