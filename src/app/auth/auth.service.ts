@@ -3,6 +3,7 @@ import {
   ConflictException,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common'
@@ -16,15 +17,20 @@ import { UserService } from '~/app/user/user.service'
 import { MailService } from '~/services/mail.service'
 import type { JwtPayload } from '~/guards/jwt-auth.guard'
 import { UserRole } from '@prisma/client'
+import { RedisService } from '~/redis/redis.service'
 
 const SALT_ROUNDS = 10
+const RESET_PASSWORD_PREFIX = 'reset-password:'
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name)
+
   constructor(
     private readonly users: UserService,
     private readonly jwt: JwtService,
     private readonly mail: MailService,
+    private readonly redis: RedisService,
     private readonly configService: ConfigService,
     @Inject(authConfig.KEY)
     private readonly auth: ConfigType<typeof authConfig>,
@@ -98,6 +104,8 @@ export class AuthService {
     email: string
     firstName?: string | null
     lastName?: string | null
+    resetUrl: string
+    resetTtlLabel: string
   }) {
     const siteUrl = this.getSiteUrl()
     return {
@@ -107,11 +115,8 @@ export class AuthService {
         lastName: details.lastName,
       }),
       email: details.email,
-      reset_ttl:
-        this.configService.get<string>('RESET_PASSWORD_TTL') ??
-        '15 минут',
-      // Текущий flow создает временный пароль сразу, отдельного reset-token URL пока нет.
-      reset_url: `${siteUrl}/acc`,
+      reset_ttl: details.resetTtlLabel,
+      reset_url: details.resetUrl,
       support_email:
         this.configService.get<string>('SUPPORT_EMAIL') ??
         'support@tourist-tours.ru',
@@ -122,6 +127,19 @@ export class AuthService {
     }
   }
 
+  private getResetTokenKey(token: string) {
+    return `${RESET_PASSWORD_PREFIX}${token}`
+  }
+
+  private getResetPasswordTtlMinutes() {
+    const raw = Number(process.env.RESET_PASSWORD_TTL_MINUTES ?? 15)
+    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 15
+  }
+
+  private getResetPasswordTtlLabel(minutes: number) {
+    return `${minutes} минут`
+  }
+
   hashPassword(raw: string) {
     return bcrypt.hash(raw, SALT_ROUNDS)
   }
@@ -130,26 +148,29 @@ export class AuthService {
     return bcrypt.compare(raw, hash)
   }
 
-  async issueNewPassword(email: string) {
+  async requestPasswordReset(email: string) {
     const normalizedEmail = email.trim().toLowerCase()
     const user = await this.users.findByEmail(normalizedEmail)
-
     if (!user) {
-      throw new NotFoundException('User not found')
+      this.logger.warn(
+        `Password reset requested for unknown email: ${normalizedEmail}`,
+      )
+      return
     }
 
-    const newPassword = this.generatePassword()
-    const passwordHash = await this.hashPassword(newPassword)
+    const ttlMinutes = this.getResetPasswordTtlMinutes()
+    const ttlSeconds = ttlMinutes * 60
+    const resetToken = randomBytes(32).toString('hex')
+    const resetUrl = `${this.getSiteUrl()}/reset-password?token=${encodeURIComponent(resetToken)}`
     const resetTemplateId = this.configService.get<string>(
       'RUSENDER_TEMPLATE_RESET',
     )
-
-    await this.users.updatePassword(user.id, passwordHash)
+    await this.redis.set(this.getResetTokenKey(resetToken), user.id, ttlSeconds)
 
     await this.mail.sendMail({
       to: normalizedEmail,
-      subject: 'Ваш пароль для входа',
-      text: `Ваш новый пароль: ${newPassword}`,
+      subject: 'Сброс пароля',
+      text: `Для сброса пароля перейдите по ссылке: ${resetUrl}. Ссылка действует ${this.getResetPasswordTtlLabel(ttlMinutes)}.`,
       ...(resetTemplateId
         ? {
             templateId: resetTemplateId,
@@ -157,12 +178,48 @@ export class AuthService {
               email: normalizedEmail,
               firstName: user.firstName,
               lastName: user.lastName,
+              resetUrl,
+              resetTtlLabel: this.getResetPasswordTtlLabel(ttlMinutes),
             }),
           }
         : {}),
     })
+  }
 
-    return { password: newPassword, user: this.users.toPublicUser(user) }
+  async resetPasswordByToken(token: string, password: string) {
+    const normalizedToken = token.trim()
+    if (!normalizedToken) {
+      throw new BadRequestException('Token is required')
+    }
+    if (!password || password.length < 8) {
+      throw new BadRequestException('Password must contain at least 8 characters')
+    }
+
+    const key = this.getResetTokenKey(normalizedToken)
+    const userId = await this.redis.get(key)
+    if (!userId) {
+      throw new BadRequestException(
+        'Ссылка для сброса пароля недействительна или истекла',
+      )
+    }
+
+    const user = await this.users.findById(userId)
+    if (!user) {
+      await this.redis.del(key)
+      throw new BadRequestException(
+        'Ссылка для сброса пароля недействительна или истекла',
+      )
+    }
+
+    const passwordHash = await this.hashPassword(password)
+    await this.users.updatePassword(user.id, passwordHash)
+    await this.redis.del(key)
+
+    await this.mail.sendMail({
+      to: user.email,
+      subject: 'Пароль был изменен',
+      text: 'Ваш пароль был успешно изменен через восстановление доступа.',
+    })
   }
 
   async validateUser(email: string, password: string) {

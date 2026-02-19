@@ -7,12 +7,14 @@ import { UserModule } from '~/app/user/user.module'
 import { MailModule } from '~/services/mail.module'
 import { JwtAuthGuard } from '~/guards/jwt-auth.guard'
 import authConfig from '~/config/auth.config'
+import { RedisModule } from '~/redis/redis.module'
 
 @Module({
   imports: [
     ConfigModule,
     forwardRef(() => UserModule),
     MailModule,
+    RedisModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],

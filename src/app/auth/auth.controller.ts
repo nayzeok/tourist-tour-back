@@ -10,6 +10,7 @@ import {
 import { FastifyReply, FastifyRequest } from 'fastify'
 import { AuthService } from './auth.service'
 import { RequestPasswordDto } from './dto/request-password.dto'
+import { ResetPasswordDto } from './dto/reset-password.dto'
 import { LoginDto } from './dto/login.dto'
 import { RegisterDto } from './dto/register.dto'
 import { JwtAuthGuard } from '~/guards/jwt-auth.guard'
@@ -21,9 +22,15 @@ export class AuthController {
 
   @Post('request-password')
   async requestPassword(@Body() body: RequestPasswordDto) {
-    await this.auth.issueNewPassword(body.email)
+    await this.auth.requestPasswordReset(body.email)
 
-    return { message: 'Password has been sent' }
+    return { message: 'Reset instructions have been sent' }
+  }
+
+  @Post('reset-password')
+  async resetPassword(@Body() body: ResetPasswordDto) {
+    await this.auth.resetPasswordByToken(body.token, body.password)
+    return { message: 'Password has been updated' }
   }
 
   @Post('login')
