@@ -105,6 +105,13 @@ export class UserService {
     })
   }
 
+  updateEmail(userId: string, newEmail: string): Promise<User> {
+    return this.db.user.update({
+      where: { id: userId },
+      data: { email: newEmail },
+    })
+  }
+
   updatePassword(userId: string, passwordHash: string): Promise<User> {
     return this.db.user.update({
       where: { id: userId },

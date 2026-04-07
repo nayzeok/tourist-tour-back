@@ -15,6 +15,8 @@ import { JwtAuthGuard } from '~/guards/jwt-auth.guard'
 import { UserService, PublicUser } from './user.service'
 import { GetBookingsQueryDto } from './dto/get-bookings.dto'
 import { ChangePasswordDto } from './dto/change-password.dto'
+import { UpdateProfileDto } from './dto/update-profile.dto'
+import { ChangeEmailDto } from './dto/change-email.dto'
 import { AuthService } from '~/app/auth/auth.service'
 
 interface AuthenticatedRequest extends FastifyRequest {
@@ -76,6 +78,37 @@ export class UserController {
 
     const { page, pageSize } = query
     return this.users.getAllBookings(page, pageSize)
+  }
+
+  @Patch('me')
+  @UseGuards(JwtAuthGuard)
+  async updateProfile(
+      @Req() req: AuthenticatedRequest,
+      @Body() body: UpdateProfileDto,
+  ) {
+    if (!req.user) {
+      return { user: null }
+    }
+    const updated = await this.users.updateProfile(req.user.id, {
+      firstName: body.firstName,
+      lastName: body.lastName,
+      phone: body.phone,
+    })
+    return { user: updated ? this.users.toPublicUser(updated) : null }
+  }
+
+  @Patch('email')
+  @UseGuards(JwtAuthGuard)
+  async changeEmail(
+      @Req() req: AuthenticatedRequest,
+      @Body() body: ChangeEmailDto,
+  ) {
+    if (!req.user) {
+      return { user: null }
+    }
+    const newEmail = await this.auth.changeEmail(req.user.id, body.currentPassword, body.newEmail)
+    const updated = await this.users.findById(req.user.id)
+    return { user: updated ? this.users.toPublicUser(updated) : null, email: newEmail }
   }
 
   @Patch('password')

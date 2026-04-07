@@ -291,6 +291,31 @@ export class AuthService {
     })
   }
 
+  async changeEmail(userId: string, currentPassword: string, newEmail: string) {
+    const user = await this.users.findById(userId)
+    if (!user) {
+      throw new NotFoundException('User not found')
+    }
+
+    const matches = await this.comparePasswords(currentPassword, user.passwordHash)
+    if (!matches) {
+      throw new BadRequestException('Неверный текущий пароль')
+    }
+
+    const normalized = newEmail.trim().toLowerCase()
+    if (normalized === user.email) {
+      throw new BadRequestException('Новый email совпадает с текущим')
+    }
+
+    const existing = await this.users.findByEmail(normalized)
+    if (existing) {
+      throw new ConflictException('Этот email уже занят')
+    }
+
+    await this.users.updateEmail(userId, normalized)
+    return normalized
+  }
+
   async getUserFromRequest(request: FastifyRequest) {
     const token = request.cookies?.[this.auth.cookieName]
     if (!token) {
