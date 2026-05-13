@@ -85,14 +85,13 @@ export class RentProgController {
         this.rentprog.getAllCarsFull(),
       ])
 
-      const freeIds = new Set(
-        (Array.isArray(freeCars) ? freeCars : []).map((c: any) => String(c.id)),
-      )
+      const freeList = Array.isArray(freeCars) ? freeCars : []
+      const freeById = new Map(freeList.map((c: any) => [String(c.id), c]))
 
       const fullList = Array.isArray(allFull) ? allFull : []
       const result = fullList
         .filter((car: any) => {
-          if (!freeIds.has(String(car.id))) return false
+          if (!freeById.has(String(car.id))) return false
           if (city) {
             const carCity = (car.store_place || '').toLowerCase().trim()
             const searchCity = city.toLowerCase().trim()
@@ -100,7 +99,15 @@ export class RentProgController {
           }
           return true
         })
-        .map((car: any) => this.mapCar(car))
+        .map((car: any) => {
+          // Берём deposit и selected_price из free_cars (дата-специфичные поля)
+          const free = freeById.get(String(car.id))
+          return this.mapCar({
+            ...car,
+            deposit: free?.deposit ?? car.deposit,
+            selected_price: free?.selected_price ?? car.selected_price,
+          })
+        })
 
       return result
     } catch (e: any) {
@@ -198,13 +205,22 @@ export class RentProgController {
 
       // 2. Получаем данные авто с ценой
       const carData = await this.rentprog.getCarData(body.carId, body.startDate, body.endDate)
-      const price = carData?.price || carData?.rental_cost || 0
+      this.logger.log(`[BOOKING] carData keys: ${JSON.stringify(Object.keys(carData ?? {}))}`)
+      this.logger.log(`[BOOKING] price fields: selected_price=${carData?.selected_price} rental_cost=${carData?.rental_cost} price=${carData?.price} prices=${JSON.stringify(carData?.prices)}`)
+      // selected_price — цена за конкретный период; rental_cost/price — fallback
+      const price = carData?.selected_price || carData?.rental_cost || carData?.price || 0
+
+      // Количество суток
+      const days = Math.max(1, Math.ceil(
+        (new Date(body.endDate).getTime() - new Date(body.startDate).getTime()) / 86400000
+      ))
 
       // 3. Создаём бронирование
       const booking = await this.rentprog.createBooking({
         car_id: Number(body.carId),
         start_date: this.toRentProgDate(body.startDate),
         end_date: this.toRentProgDate(body.endDate),
+        days,
         start_place: body.pickupLocation || 'Офис аренды',
         end_place: body.returnLocation || body.pickupLocation || 'Офис аренды',
         client_id: clientId || undefined,
@@ -279,14 +295,21 @@ export class RentProgController {
   async getAdminBookings(
     @Query('page') page = '1',
     @Query('per_page') perPage = '20',
+    @Query('search') search?: string,
+    @Query('type') type?: string,
     @Req() req: AuthRequest,
   ) {
     if (req.user?.role !== 'SUPERADMIN' && req.user?.role !== 'ADMIN') {
       throw new BadRequestException('Нет доступа')
     }
     try {
-      const data = await this.rentprog.getAllBookings(Number(page), Number(perPage))
-      return data
+      if (search?.trim()) {
+        return await this.rentprog.searchBookings(search.trim(), Number(page))
+      }
+      if (type === 'active') {
+        return await this.rentprog.getActiveBookings(Number(page), Number(perPage))
+      }
+      return await this.rentprog.getAllBookings(Number(page), Number(perPage))
     } catch (e: any) {
       this.logger.error('getAdminBookings error', e?.message)
       throw new InternalServerErrorException('Ошибка получения бронирований')

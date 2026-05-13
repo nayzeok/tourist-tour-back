@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common'
+import { Module, forwardRef } from '@nestjs/common'
 import { RentProgService } from './rentprog.service'
 import { RentProgController } from './rentprog.controller'
 import { RedisModule } from '~/redis/redis.module'
@@ -8,7 +8,7 @@ import { ScheduleModule } from '@nestjs/schedule'
 import { RentUserModule } from '~/app/rent-user/rent-user.module'
 
 @Module({
-  imports: [RedisModule, AuthModule, UserModule, ScheduleModule.forRoot(), RentUserModule],
+  imports: [RedisModule, AuthModule, UserModule, ScheduleModule.forRoot(), forwardRef(() => RentUserModule)],
   controllers: [RentProgController],
   providers: [RentProgService],
   exports: [RentProgService],

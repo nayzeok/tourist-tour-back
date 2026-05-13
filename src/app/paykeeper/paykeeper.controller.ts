@@ -66,25 +66,37 @@ export class PayKeeperController {
     }
 
     res.status(200).type('text/plain').send(result.response)
-    if (orderid && sum) {
-      this.logger.log(`Webhook received: starting booking creation for orderid=${orderid}, sum=${sum}`)
-      this.reservation
-        .createBookingAfterPayment(orderid, sum)
-        .then((bookingResult) => {
-          const bookingNumber = bookingResult?.booking?.number
-          this.logger.log(`Booking created successfully: orderid=${orderid}, bookingNumber=${bookingNumber}`)
-          if (bookingNumber) {
-            this.paykeeper.onPaymentSuccess(bookingNumber, id, sum).catch((err) => {
-              this.logger.error(`onPaymentSuccess failed for booking ${bookingNumber}: ${err}`)
-            })
-          }
-        })
-        .catch((err) => {
-          this.logger.error(`createBookingAfterPayment FAILED for orderid=${orderid}: ${err?.message ?? err}`, err?.stack)
-        })
-    } else {
-      this.logger.warn(`Webhook: missing orderid (${orderid}) or sum (${sum}), skipping booking creation`)
+    if (!orderid || !sum) {
+      this.logger.warn(`Webhook: missing orderid (${orderid}) or sum (${sum}), skipping`)
+      return
     }
+
+    // Аренда авто: orderId = 'rent_' + bookingId
+    if (orderid.startsWith('rent_')) {
+      const bookingId = orderid.slice(5)
+      this.logger.log(`Webhook: rent payment for bookingId=${bookingId}, sum=${sum}`)
+      this.paykeeper.onRentPaymentSuccess(bookingId, sum).catch((err) => {
+        this.logger.error(`onRentPaymentSuccess failed for ${bookingId}: ${err?.message ?? err}`)
+      })
+      return
+    }
+
+    // Отели: orderId = paymentId из Redis
+    this.logger.log(`Webhook received: starting booking creation for orderid=${orderid}, sum=${sum}`)
+    this.reservation
+      .createBookingAfterPayment(orderid, sum)
+      .then((bookingResult) => {
+        const bookingNumber = bookingResult?.booking?.number
+        this.logger.log(`Booking created successfully: orderid=${orderid}, bookingNumber=${bookingNumber}`)
+        if (bookingNumber) {
+          this.paykeeper.onPaymentSuccess(bookingNumber, id, sum).catch((err) => {
+            this.logger.error(`onPaymentSuccess failed for booking ${bookingNumber}: ${err}`)
+          })
+        }
+      })
+      .catch((err) => {
+        this.logger.error(`createBookingAfterPayment FAILED for orderid=${orderid}: ${err?.message ?? err}`, err?.stack)
+      })
   }
 
   /**

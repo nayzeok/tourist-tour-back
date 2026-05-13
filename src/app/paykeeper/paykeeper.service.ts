@@ -2,12 +2,15 @@ import {
   Injectable,
   Logger,
   OnModuleInit,
+  Inject,
+  forwardRef,
 } from '@nestjs/common'
 import { ConfigService } from '@nestjs/config'
 import { ConfigType } from '@nestjs/config'
 import paykeeperConfig from '~/config/paykeeper.config'
 import { createHash } from 'crypto'
 import { DbService } from '~/db/db.service'
+import { RentProgService } from '~/app/rentprog/rentprog.service'
 
 export interface PayKeeperCartItem {
   name: string
@@ -47,6 +50,7 @@ export class PayKeeperService implements OnModuleInit {
   constructor(
     private readonly configService: ConfigService,
     private readonly db: DbService,
+    @Inject(forwardRef(() => RentProgService)) private readonly rentprog: RentProgService,
   ) {}
 
   onModuleInit() {
@@ -199,7 +203,43 @@ export class PayKeeperService implements OnModuleInit {
     })
     if (booking) {
       this.logger.log(`Booking ${orderId} linked to successful PayKeeper payment`)
-      // При добавлении paymentStatus в схему: await this.db.booking.update({ where: { number: orderId }, data: { paymentStatus: 'paid' } })
+    }
+  }
+
+  /** Вызывается после успешного webhook для аренды авто (orderId = 'rent_' + bookingId) */
+  async onRentPaymentSuccess(bookingId: string, sum: string): Promise<void> {
+    const amount = Number(sum)
+
+    // 1. Обновляем нашу БД
+    const booking = await this.db.rentBooking.update({
+      where: { id: bookingId },
+      data: {
+        paymentStatus: 'paid',
+        paidAmount: Number.isFinite(amount) ? amount : undefined,
+        status: 'active',
+      },
+    })
+    this.logger.log(`RentBooking ${bookingId} marked as paid, amount=${sum}`)
+
+    // 2. Активируем бронь в RentProg
+    if (booking.rentprogId) {
+      const rpId = Number(booking.rentprogId)
+      try {
+        await this.rentprog.updateBooking(rpId, { active: true })
+        this.logger.log(`RentProg booking ${rpId} activated`)
+      } catch (e: any) {
+        this.logger.error(`Failed to activate RentProg booking ${rpId}: ${e?.message}`)
+      }
+
+      // 3. Фиксируем оплату в RentProg
+      if (Number.isFinite(amount) && amount > 0) {
+        try {
+          await this.rentprog.createPayment(rpId, [{ sum: amount, group: 1 }])
+          this.logger.log(`RentProg payment created for booking ${rpId}, sum=${amount}`)
+        } catch (e: any) {
+          this.logger.error(`Failed to create RentProg payment for ${rpId}: ${e?.message}`)
+        }
+      }
     }
   }
 }

@@ -1,9 +1,9 @@
 import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common'
-import { PrismaService } from '~/db/prisma.service'
+import { DbService } from '~/db/db.service'
 
 @Injectable()
 export class RentUserService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: DbService) {}
 
   // ─── Бронирования пользователя ────────────────────────────────────────────
 
