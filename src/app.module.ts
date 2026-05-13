@@ -22,6 +22,8 @@ import { UserModule } from '~/app/user/user.module'
 import { ImageProxyModule } from '~/app/image-proxy/image-proxy.module'
 import { SyncModule } from '~/app/sync/sync.module'
 import { PayKeeperModule } from '~/app/paykeeper/paykeeper.module'
+import { RentProgModule } from '~/app/rentprog/rentprog.module'
+import { RentUserModule } from '~/app/rent-user/rent-user.module'
 
 @Module({
   imports: [
@@ -70,6 +72,8 @@ import { PayKeeperModule } from '~/app/paykeeper/paykeeper.module'
     ScheduleModule.forRoot(),
     SyncModule,
     PayKeeperModule,
+    RentProgModule,
+    RentUserModule,
   ],
 
   controllers: [],

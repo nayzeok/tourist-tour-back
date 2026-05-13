@@ -8,10 +8,13 @@ import {
   NestFastifyApplication,
 } from '@nestjs/platform-fastify'
 import fastifyHelmet from '@fastify/helmet'
+import fastifyStatic from '@fastify/static'
 import { randomUUID } from 'crypto'
 import { ZodValidationPipe } from 'nestjs-zod'
 import { cleanupOpenApiDoc } from 'nestjs-zod'
 import authConfig from '~/config/auth.config'
+import { join } from 'path'
+import { mkdirSync } from 'fs'
 
 async function bootstrap() {
   const app = await NestFactory.create<NestFastifyApplication>(
@@ -27,6 +30,15 @@ async function bootstrap() {
   await app.register(fastifyHelmet, {
     crossOriginResourcePolicy: { policy: 'cross-origin' },
     contentSecurityPolicy: false, // Отключаем CSP для dev, можно настроить для prod
+  })
+
+  // Статика: /uploads/* → ./uploads/
+  const uploadsDir = join(process.cwd(), 'uploads')
+  mkdirSync(uploadsDir, { recursive: true })
+  await app.register(fastifyStatic, {
+    root: uploadsDir,
+    prefix: '/uploads/',
+    decorateReply: false,
   })
 
   const configService = app.get(ConfigService)

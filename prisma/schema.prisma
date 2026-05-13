@@ -28,6 +28,8 @@ model User {
   updatedAt    DateTime  @updatedAt
 
   bookings     Booking[]
+  rentBookings RentBooking[]
+  profile      UserProfile?
 }
 
 model Booking {
@@ -47,4 +49,55 @@ model Booking {
   updatedAt     DateTime @updatedAt
 
   @@index([userId, createdAt])
+}
+
+model RentBooking {
+  id                String   @id @default(dbgenerated("uuid_generate_v4()"))
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId            String
+  rentprogId        String?  // ID брони в RentProg
+  carId             String   // ID авто в RentProg
+  carName           String   // Кешированное название авто
+  carImage          String?  // Кешированное фото
+  city              String?
+  startDate         DateTime
+  endDate           DateTime
+  pickupLocation    String?
+  returnLocation    String?
+  firstName         String
+  lastName          String
+  phone             String
+  totalAmount       Float?
+  // Статус брони: new | active | cancelled | completed | archived
+  status            String   @default("new")
+  // Статус оплаты: unpaid | partial | paid
+  paymentStatus     String   @default("unpaid")
+  paidAmount        Float?   // Оплаченная сумма
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([rentprogId])
+}
+
+model UserProfile {
+  id                  String   @id @default(dbgenerated("uuid_generate_v4()"))
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId              String   @unique
+  // Паспорт
+  passportSeries      String?
+  passportNumber      String?
+  passportIssuedBy    String?
+  passportIssuedDate  String?
+  passportCode        String?
+  // Прописка
+  registrationAddress String?
+  // Водительское удостоверение
+  licenseNumber       String?
+  licenseIssuedDate   String?
+  licenseExpiryDate   String?
+  // Блокировка редактирования после первого сохранения
+  isLocked            Boolean  @default(false)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
 }
