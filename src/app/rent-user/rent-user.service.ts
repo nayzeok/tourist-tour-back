@@ -38,6 +38,7 @@ export class RentUserService {
     lastName: string
     phone: string
     totalAmount?: number
+    depositAmount?: number
   }) {
     return this.prisma.rentBooking.create({
       data: {
@@ -55,9 +56,28 @@ export class RentUserService {
         lastName: data.lastName,
         phone: data.phone,
         totalAmount: data.totalAmount,
+        depositAmount: data.depositAmount,
         status: 'new',
         paymentStatus: 'unpaid',
       },
+    })
+  }
+
+  async updateBookingRentprogId(id: string, rentprogId: string) {
+    return this.prisma.rentBooking.update({
+      where: { id },
+      data: { rentprogId },
+    })
+  }
+
+  async getBookingForAdmin(id: string) {
+    return this.prisma.rentBooking.findUnique({ where: { id } })
+  }
+
+  async adminUpdateBookingDeposit(id: string, data: { status?: string; depositStatus?: string }) {
+    return this.prisma.rentBooking.update({
+      where: { id },
+      data,
     })
   }
 

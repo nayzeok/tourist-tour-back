@@ -68,6 +68,9 @@ model RentBooking {
   lastName          String
   phone             String
   totalAmount       Float?
+  depositAmount     Float?   // Сумма залога (из RentProg)
+  depositStatus     String?  // held | captured | released
+  paykeeperPaymentId String? // ID платежа PayKeeper для capture/void холда
   // Статус брони: new | active | cancelled | completed | archived
   status            String   @default("new")
   // Статус оплаты: unpaid | partial | paid

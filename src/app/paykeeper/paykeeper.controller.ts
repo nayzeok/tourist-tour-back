@@ -71,7 +71,17 @@ export class PayKeeperController {
       return
     }
 
-    // Аренда авто: orderId = 'rent_' + bookingId
+    // Аренда авто с холдом депозита: orderId = 'rent_hold_' + bookingId
+    if (orderid.startsWith('rent_hold_')) {
+      const bookingId = orderid.slice(10)
+      this.logger.log(`Webhook: rent hold for bookingId=${bookingId}, paymentId=${id}, sum=${sum}`)
+      this.paykeeper.onRentHoldSuccess(bookingId, id, sum).catch((err) => {
+        this.logger.error(`onRentHoldSuccess failed for ${bookingId}: ${err?.message ?? err}`)
+      })
+      return
+    }
+
+    // Аренда авто без депозита: orderId = 'rent_' + bookingId
     if (orderid.startsWith('rent_')) {
       const bookingId = orderid.slice(5)
       this.logger.log(`Webhook: rent payment for bookingId=${bookingId}, sum=${sum}`)

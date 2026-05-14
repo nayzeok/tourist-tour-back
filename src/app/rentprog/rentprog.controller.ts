@@ -14,6 +14,7 @@ import {
 } from '@nestjs/common'
 import { RentProgService } from './rentprog.service'
 import { RentUserService } from '~/app/rent-user/rent-user.service'
+import { PayKeeperService } from '~/app/paykeeper/paykeeper.service'
 import { JwtAuthGuard } from '~/guards/jwt-auth.guard'
 import { FastifyRequest, FastifyReply } from 'fastify'
 import axios from 'axios'
@@ -29,6 +30,7 @@ export class RentProgController {
   constructor(
     private readonly rentprog: RentProgService,
     private readonly rentUser: RentUserService,
+    private readonly paykeeper: PayKeeperService,
   ) {}
 
   // ─── GET /rent/image-proxy?url=... ────────────────────────────────────────
@@ -201,22 +203,43 @@ export class RentProgController {
         email: user?.email || '',
       })
 
+      this.logger.log(`[BOOKING] createClient response: ${JSON.stringify(client)}`)
+
       const clientId = client?.id || client?.client?.id
+
+      this.logger.log(`[BOOKING] clientId=${clientId} firstName=${body.firstName} lastName=${body.lastName}`)
+
+      // Всегда обновляем имя/фамилию клиента (на случай если клиент уже существовал с пустым именем)
+      if (clientId) {
+        try {
+          const updateRes = await this.rentprog.updateClient(clientId, {
+            name: body.firstName,
+            lastname: body.lastName,
+            phone: body.phone,
+            email: user?.email || '',
+          })
+          this.logger.log(`[BOOKING] updateClient response: ${JSON.stringify(updateRes)}`)
+        } catch (e: any) {
+          this.logger.warn(`[BOOKING] updateClient failed: ${e?.message} | ${JSON.stringify(e?.response?.data)}`)
+        }
+      }
 
       // 2. Получаем данные авто с ценой
       const carData = await this.rentprog.getCarData(body.carId, body.startDate, body.endDate)
       this.logger.log(`[BOOKING] carData keys: ${JSON.stringify(Object.keys(carData ?? {}))}`)
       this.logger.log(`[BOOKING] price fields: selected_price=${carData?.selected_price} rental_cost=${carData?.rental_cost} price=${carData?.price} prices=${JSON.stringify(carData?.prices)}`)
-      // selected_price — цена за конкретный период; rental_cost/price — fallback
-      const price = carData?.selected_price || carData?.rental_cost || carData?.price || 0
 
       // Количество суток
       const days = Math.max(1, Math.ceil(
         (new Date(body.endDate).getTime() - new Date(body.startDate).getTime()) / 86400000
       ))
 
+      // selected_price — цена за 1 сутки для выбранного периода
+      const pricePerDay = carData?.selected_price || carData?.rental_cost || carData?.price || 0
+      const totalPrice = pricePerDay * days
+
       // 3. Создаём бронирование
-      const booking = await this.rentprog.createBooking({
+      const bookingPayload = {
         car_id: Number(body.carId),
         start_date: this.toRentProgDate(body.startDate),
         end_date: this.toRentProgDate(body.endDate),
@@ -230,17 +253,23 @@ export class RentProgController {
         email: user?.email || '',
         active: false,
         manual_editing: false,
-        rental_cost: price,
-        total: price,
-      })
+        rental_cost: totalPrice,
+        total: totalPrice,
+      }
 
-      const rentprogId = String(booking?.id || booking?.booking?.id || '')
+      this.logger.log(`[BOOKING] carId=${body.carId} pricePerDay=${pricePerDay} days=${days} totalPrice=${totalPrice} client=${body.firstName} ${body.lastName}`)
 
-      // 4. Сохраняем бронирование в нашей БД
+      // 3. Создаём бронь в RentProg (неактивная, активируется после оплаты)
+      const rentprogBooking = await this.rentprog.createBooking(bookingPayload)
+      const rentprogId = String(rentprogBooking?.id || rentprogBooking?.booking?.id || '')
+
+      // 4. Сохраняем в нашей БД
       const apiBase = (process.env.API_BASE_URL || 'http://localhost:3001').replace(/\/$/, '')
       const carImage = carData?.avatar_url
         ? `${apiBase}/rent/image-proxy?url=${encodeURIComponent(carData.avatar_url)}`
         : undefined
+
+      const deposit = carData?.deposit ? Number(carData.deposit) : undefined
 
       const localBooking = await this.rentUser.createBooking(user!.id, {
         rentprogId,
@@ -255,7 +284,8 @@ export class RentProgController {
         firstName: body.firstName,
         lastName: body.lastName,
         phone: body.phone,
-        totalAmount: price || undefined,
+        totalAmount: totalPrice || undefined,
+        depositAmount: deposit,
       })
 
       return {
@@ -297,9 +327,9 @@ export class RentProgController {
     @Query('per_page') perPage = '20',
     @Query('search') search?: string,
     @Query('type') type?: string,
-    @Req() req: AuthRequest,
+    @Req() req?: AuthRequest,
   ) {
-    if (req.user?.role !== 'SUPERADMIN' && req.user?.role !== 'ADMIN') {
+    if (req?.user?.role !== 'SUPERADMIN' && req?.user?.role !== 'ADMIN') {
       throw new BadRequestException('Нет доступа')
     }
     try {
@@ -342,7 +372,7 @@ export class RentProgController {
     const day = String(d.getDate()).padStart(2, '0')
     const month = String(d.getMonth() + 1).padStart(2, '0')
     const year = d.getFullYear()
-    const hours = d.getHours()
+    const hours = String(d.getHours()).padStart(2, '0')
     const minutes = String(d.getMinutes()).padStart(2, '0')
     return `${day}-${month}-${year} ${hours}:${minutes}`
   }
