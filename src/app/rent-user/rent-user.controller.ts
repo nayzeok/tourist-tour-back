@@ -234,6 +234,20 @@ export class RentUserController {
 
   // ─── Админские эндпоинты ──────────────────────────────────────────────────
 
+  // GET /rent-user/admin/bookings/by-rentprog/:rentprogId
+  // Найти локальное бронирование по ID в RentProg (для получения userId / профиля)
+  @Get('admin/bookings/by-rentprog/:rentprogId')
+  @UseGuards(JwtAuthGuard)
+  async adminGetBookingByRentprog(
+    @Param('rentprogId') rentprogId: string,
+    @Req() req: AuthRequest,
+  ) {
+    if (req.user?.role !== 'SUPERADMIN' && req.user?.role !== 'ADMIN') {
+      throw new ForbiddenException('Нет доступа')
+    }
+    return this.svc.getBookingByRentprogId(rentprogId)
+  }
+
   // GET /rent-user/admin/bookings
   @Get('admin/bookings')
   @UseGuards(JwtAuthGuard)

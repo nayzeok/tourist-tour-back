@@ -74,6 +74,15 @@ export class RentUserService {
     return this.prisma.rentBooking.findUnique({ where: { id } })
   }
 
+  async getBookingByRentprogId(rentprogId: string) {
+    return this.prisma.rentBooking.findFirst({
+      where: { rentprogId },
+      include: {
+        user: { select: { id: true, email: true, firstName: true, lastName: true, phone: true } },
+      },
+    })
+  }
+
   async adminUpdateBookingDeposit(id: string, data: { status?: string; depositStatus?: string }) {
     return this.prisma.rentBooking.update({
       where: { id },

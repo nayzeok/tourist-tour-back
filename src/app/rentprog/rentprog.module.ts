@@ -7,9 +7,10 @@ import { UserModule } from '~/app/user/user.module'
 import { ScheduleModule } from '@nestjs/schedule'
 import { RentUserModule } from '~/app/rent-user/rent-user.module'
 import { PayKeeperModule } from '~/app/paykeeper/paykeeper.module'
+import { MailModule } from '~/services/mail.module'
 
 @Module({
-  imports: [RedisModule, AuthModule, UserModule, ScheduleModule.forRoot(), forwardRef(() => RentUserModule), forwardRef(() => PayKeeperModule)],
+  imports: [RedisModule, AuthModule, UserModule, ScheduleModule.forRoot(), forwardRef(() => RentUserModule), forwardRef(() => PayKeeperModule), MailModule],
   controllers: [RentProgController],
   providers: [RentProgService],
   exports: [RentProgService],

@@ -15,6 +15,7 @@ import {
 import { RentProgService } from './rentprog.service'
 import { RentUserService } from '~/app/rent-user/rent-user.service'
 import { PayKeeperService } from '~/app/paykeeper/paykeeper.service'
+import { MailService } from '~/services/mail.service'
 import { JwtAuthGuard } from '~/guards/jwt-auth.guard'
 import { FastifyRequest, FastifyReply } from 'fastify'
 import axios from 'axios'
@@ -31,6 +32,7 @@ export class RentProgController {
     private readonly rentprog: RentProgService,
     private readonly rentUser: RentUserService,
     private readonly paykeeper: PayKeeperService,
+    private readonly mail: MailService,
   ) {}
 
   // ─── GET /rent/image-proxy?url=... ────────────────────────────────────────
@@ -287,6 +289,54 @@ export class RentProgController {
         totalAmount: totalPrice || undefined,
         depositAmount: deposit,
       })
+
+      // 5. Отправляем письма
+      const fmt = (d: string) => new Date(d).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+      const price = totalPrice ? totalPrice.toLocaleString('ru-RU') + ' ₽' : '—'
+      const depositStr = deposit ? deposit.toLocaleString('ru-RU') + ' ₽ (оплачивается при получении авто)' : '—'
+
+      // Письмо администратору
+      this.mail.sendMail({
+        to: 'nayzeok@gmail.com',
+        subject: `Новое бронирование аренды авто: ${carData?.car_name || body.carId}`,
+        html: `
+          <h2>Новое бронирование аренды автомобиля</h2>
+          <ul>
+            <li><b>Автомобиль:</b> ${carData?.car_name || body.carId}</li>
+            <li><b>Период:</b> ${fmt(body.startDate)} — ${fmt(body.endDate)} (${days} дн.)</li>
+            <li><b>Место выдачи:</b> ${body.pickupLocation || '—'}</li>
+            <li><b>Место возврата:</b> ${body.returnLocation || '—'}</li>
+            <li><b>Клиент:</b> ${body.firstName} ${body.lastName}</li>
+            <li><b>Телефон:</b> ${body.phone}</li>
+            <li><b>Email:</b> ${user?.email || '—'}</li>
+            <li><b>Стоимость аренды:</b> ${price}</li>
+            <li><b>Залог:</b> ${depositStr}</li>
+            <li><b>ID брони:</b> ${localBooking.id}</li>
+          </ul>
+        `,
+      }).catch((e: any) => this.logger.warn(`Admin email failed: ${e?.message}`))
+
+      // Письмо клиенту
+      if (user?.email) {
+        this.mail.sendMail({
+          to: user.email,
+          subject: `Бронирование автомобиля подтверждено`,
+          html: `
+            <h2>Ваше бронирование принято!</h2>
+            <p>Здравствуйте, ${body.firstName}!</p>
+            <p>Мы получили вашу заявку на аренду автомобиля. Для завершения бронирования необходимо произвести оплату.</p>
+            <ul>
+              <li><b>Автомобиль:</b> ${carData?.car_name || body.carId}</li>
+              <li><b>Период:</b> ${fmt(body.startDate)} — ${fmt(body.endDate)} (${days} дн.)</li>
+              <li><b>Место выдачи:</b> ${body.pickupLocation || '—'}</li>
+              <li><b>Стоимость аренды:</b> ${price}</li>
+              <li><b>Залог:</b> ${depositStr}</li>
+            </ul>
+            <p>Перейдите в <a href="https://tourist-tours.ru/acc/rent/${localBooking.id}">личный кабинет</a>, чтобы оплатить бронирование.</p>
+            <p>По всем вопросам звоните: 8 800 551 9000</p>
+          `,
+        }).catch((e: any) => this.logger.warn(`User email failed: ${e?.message}`))
+      }
 
       return {
         booking: {
